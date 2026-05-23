@@ -2,37 +2,12 @@
 #define PLASMA_H
 
 #include <stdint.h>
-
 #include "opalo.h"
 
-// ----------------------------------------------------
-// PALETA
-// ----------------------------------------------------
-
-void generar_paleta(Opalo* o);
-
-// ----------------------------------------------------
-// RENDER FULLSCREEN
-// ----------------------------------------------------
-
-void renderizar_opalo(Opalo* o);
-
-// ----------------------------------------------------
-// CORE PROCEDURAL
-// Usado por thumbnails/cache/render parcial
-// ----------------------------------------------------
-
-uint8_t plasma_pixel(
-    int x,
-    int y,
-    uint8_t off,
-    const Opalo* o
-);
-
-// ----------------------------------------------------
-// UI FX
-// ----------------------------------------------------
-
-void flash_guardado(void);
+void    generar_paleta(Opalo* o);
+void    renderizar_opalo(Opalo* o);
+void    renderizar_roca(const Chunk* c);
+uint8_t plasma_pixel(int x, int y, uint8_t off, const Opalo* o);
+void    flash_guardado(void);
 
 #endif
