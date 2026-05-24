@@ -1,3 +1,6 @@
+// 2.0
+
+
 #include "opalo.h"
 
 static uint32_t hash32(uint32_t x) {

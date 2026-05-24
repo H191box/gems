@@ -1,3 +1,6 @@
+
+//2.0
+
 #include <stdint.h>
 #include <gba_video.h>
 #include "video.h"
