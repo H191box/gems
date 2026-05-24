@@ -4,22 +4,21 @@
 #include <stdint.h>
 #include "opalo.h"
 
+// Definiciones básicas
 #define MAX_CAPTURAS 8
 
-// Inicialización y persistencia básica
+// Funciones de inicialización y semillas
 void     save_init(void); 
-
-// Semillas
 uint32_t cargar_seed(void);
 void     guardar_seed(uint32_t seed);
 
-// Gestión de chunks
+// Gestión de Chunks
 int      cargar_chunks(Chunk* slots);
 void     guardar_chunk(const Chunk* c);
 void     sobreescribir_chunk(int slot, const Chunk* c);
-void     decrementar_num_chunks(void); // Nueva función añadida
+void     decrementar_num_chunks(void); // <--- ESTA FALTABA
 
-// Economía
+// Gestión de Economía (Tus funciones nuevas)
 uint32_t obtener_dinero(void);
 void     modificar_dinero(int32_t cantidad);
 
