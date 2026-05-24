@@ -1,127 +1,96 @@
 #include <stdint.h>
+#include <string.h>
 #include "save.h"
 #include "opalo.h"
 
-#define SRAM_BASE ((uint8_t*)0x0E000000)
-
-// -----------------------------------------------------
-// SRAM LAYOUT
-//
-// 0x00  SaveHeader  (12 bytes)
-// 0x10  uint32_t    num_chunks
-// 0x20  Chunk[8]    slots  (9 bytes cada uno = 72 bytes)
-// -----------------------------------------------------
+#define TAMANIO_RAM_DATA 256 
 #define SRAM_HEADER    0x00
 #define SRAM_NUM       0x10
 #define SRAM_SLOTS     0x20
+#define SRAM_DINERO    0xA0 
 
-#define SAVE_MAGIC   "OPAL"
-#define SAVE_VERSION  2        // subimos versión por cambio de formato
+static uint8_t sram_virtual[TAMANIO_RAM_DATA];
+static uint8_t inicializado_ram = 0;
 
-typedef struct {
-    char     magic[4];
-    uint32_t version;
-    uint32_t current_seed;
-} SaveHeader;
-
-// -----------------------------------------------------
-// SRAM IO
-// -----------------------------------------------------
-static void sram_read(void* dst, const void* src, uint32_t size) {
-    volatile uint8_t* s = (volatile uint8_t*)src;
-    uint8_t* d = (uint8_t*)dst;
-    for (uint32_t i = 0; i < size; i++) d[i] = s[i];
-}
-
-static void sram_write(void* dst, const void* src, uint32_t size) {
-    volatile uint8_t* d = (volatile uint8_t*)dst;
-    const uint8_t* s = (const uint8_t*)src;
-    for (uint32_t i = 0; i < size; i++) d[i] = s[i];
-}
-
-// -----------------------------------------------------
-// VALIDATION
-// -----------------------------------------------------
-static int save_valido(void) {
-    SaveHeader h;
-    sram_read(&h, SRAM_BASE + SRAM_HEADER, sizeof(SaveHeader));
-    return h.magic[0] == 'O' &&
-           h.magic[1] == 'P' &&
-           h.magic[2] == 'A' &&
-           h.magic[3] == 'L' &&
-           h.version  == SAVE_VERSION;
-}
-
-// -----------------------------------------------------
-// INIT
-// -----------------------------------------------------
 void save_init(void) {
-    if (save_valido()) return;
+    if (inicializado_ram) return;
+    
+    memset(sram_virtual, 0, TAMANIO_RAM_DATA);
 
-    SaveHeader h;
-    h.magic[0]     = 'O';
-    h.magic[1]     = 'P';
-    h.magic[2]     = 'A';
-    h.magic[3]     = 'L';
-    h.version      = SAVE_VERSION;
-    h.current_seed = 1234567;
-    sram_write(SRAM_BASE + SRAM_HEADER, &h, sizeof(SaveHeader));
+    // Valores iniciales en RAM
+    uint32_t seed = 1234567;
+    uint32_t n = 0;
+    uint32_t dinero = 500;
 
-    uint32_t cero = 0;
-    sram_write(SRAM_BASE + SRAM_NUM, &cero, sizeof(uint32_t));
+    // Escribir en memoria virtual
+    memcpy(&sram_virtual[SRAM_HEADER + 8], &seed, sizeof(uint32_t)); 
+    memcpy(&sram_virtual[SRAM_NUM], &n, sizeof(uint32_t));
+    memcpy(&sram_virtual[SRAM_DINERO], &dinero, sizeof(uint32_t));
+
+    inicializado_ram = 1;
 }
 
-// -----------------------------------------------------
-// CURRENT SEED
-// -----------------------------------------------------
 uint32_t cargar_seed(void) {
     save_init();
-    SaveHeader h;
-    sram_read(&h, SRAM_BASE + SRAM_HEADER, sizeof(SaveHeader));
-    return h.current_seed;
+    uint32_t seed;
+    memcpy(&seed, &sram_virtual[SRAM_HEADER + 8], sizeof(uint32_t));
+    return seed;
 }
 
 void guardar_seed(uint32_t seed) {
     save_init();
-    SaveHeader h;
-    sram_read(&h, SRAM_BASE + SRAM_HEADER, sizeof(SaveHeader));
-    h.current_seed = seed;
-    sram_write(SRAM_BASE + SRAM_HEADER, &h, sizeof(SaveHeader));
+    memcpy(&sram_virtual[SRAM_HEADER + 8], &seed, sizeof(uint32_t));
 }
 
-// -----------------------------------------------------
-// CHUNKS
-// -----------------------------------------------------
 int cargar_chunks(Chunk* slots) {
     save_init();
-    uint32_t n = 0;
-    sram_read(&n, SRAM_BASE + SRAM_NUM, sizeof(uint32_t));
-    if (n > MAX_CAPTURAS) n = 0;
-
-    for (uint32_t i = 0; i < n; i++) {
-        sram_read(&slots[i],
-                  SRAM_BASE + SRAM_SLOTS + i * sizeof(Chunk),
-                  sizeof(Chunk));
-    }
-    return (int)n;
+    uint32_t n;
+    memcpy(&n, &sram_virtual[SRAM_NUM], sizeof(uint32_t));
+    if (n > MAX_CAPTURAS) n = MAX_CAPTURAS;
+    
+    memcpy(slots, &sram_virtual[SRAM_SLOTS], n * sizeof(Chunk));
+    return (int)n; 
 }
 
 void guardar_chunk(const Chunk* c) {
     save_init();
-    uint32_t n = 0;
-    sram_read(&n, SRAM_BASE + SRAM_NUM, sizeof(uint32_t));
-    if (n > MAX_CAPTURAS) n = 0;
+    uint32_t n;
+    memcpy(&n, &sram_virtual[SRAM_NUM], sizeof(uint32_t));
     if (n >= MAX_CAPTURAS) return;
-
-    sram_write(SRAM_BASE + SRAM_SLOTS + n * sizeof(Chunk),
-               c, sizeof(Chunk));
+    
+    memcpy(&sram_virtual[SRAM_SLOTS + (n * sizeof(Chunk))], c, sizeof(Chunk));
     n++;
-    sram_write(SRAM_BASE + SRAM_NUM, &n, sizeof(uint32_t));
+    memcpy(&sram_virtual[SRAM_NUM], &n, sizeof(uint32_t));
 }
 
 void sobreescribir_chunk(int slot, const Chunk* c) {
     save_init();
     if (slot < 0 || slot >= MAX_CAPTURAS) return;
-    sram_write(SRAM_BASE + SRAM_SLOTS + slot * sizeof(Chunk),
-               c, sizeof(Chunk));
+    memcpy(&sram_virtual[SRAM_SLOTS + (slot * sizeof(Chunk))], c, sizeof(Chunk));
+}
+
+void decrementar_num_chunks(void) {
+    save_init();
+    uint32_t n = 0;
+    memcpy(&n, &sram_virtual[SRAM_NUM], sizeof(uint32_t));
+    if (n > 0) {
+        n--;
+        memcpy(&sram_virtual[SRAM_NUM], &n, sizeof(uint32_t));
+    }
+}
+
+uint32_t obtener_dinero(void) {
+    save_init();
+    uint32_t dinero;
+    memcpy(&dinero, &sram_virtual[SRAM_DINERO], sizeof(uint32_t));
+    return dinero;
+}
+
+void modificar_dinero(int32_t cantidad) {
+    save_init();
+    uint32_t dinero_actual = obtener_dinero();
+    int32_t total = (int32_t)dinero_actual + cantidad;
+    if (total < 0) total = 0;
+    uint32_t nuevo_dinero = (uint32_t)total;
+    memcpy(&sram_virtual[SRAM_DINERO], &nuevo_dinero, sizeof(uint32_t));
 }

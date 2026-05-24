@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdio.h> // Para sprintf
 #include <gba_video.h>
 #include <gba_input.h>
 #include "galeria.h"
@@ -16,7 +17,7 @@
 // Divisor:   115-116
 // Derecha:   117-239 (descripcion)
 // -------------------------------------------------------
-#define LIST_W      115
+#define LIST_W       115
 #define LIST_ITEM_H  14
 #define LIST_ITEMS    8   // filas visibles
 #define SCROLL_MAX   (MAX_CAPTURAS - LIST_ITEMS)
@@ -47,6 +48,7 @@ static const char* NOMBRE_TAM[5] = {
 // -------------------------------------------------------
 typedef enum {
     VISTA_LISTA,
+    VISTA_SUBMENU, // NUEVO ESTADO para elegir Ver o Vender
     VISTA_IMAGEN
 } VistaGaleria;
 
@@ -55,6 +57,7 @@ static Chunk        items[MAX_CAPTURAS];
 static int          num_items;
 static int          cursor;
 static int          scroll;    // primera fila visible
+static int          opcion_submenu; // 0 = VER, 1 = VENDER
 
 // -------------------------------------------------------
 // PALETA UI
@@ -66,6 +69,7 @@ static void init_paleta_ui(void) {
     pal[2]  = 0x681F;                               // morado fila seleccionada
     pal[3]  = 0x4210;                               // gris divisor
     pal[4]  = 0x6810;                               // azul cabecera
+    pal[5]  = 0x1F00;                               // NUEVO: Azul oscuro para el fondo del submenú
     pal[255]= 0x7FFF;                               // blanco texto
 }
 
@@ -94,10 +98,49 @@ static void vline(uint16_t* vram, int x, int y, int h, uint8_t c) {
     for (int yy = y; yy < y + h; yy++) put_pixel(vram, x, yy, c);
 }
 
-// Convierte uint8 a 2 dígitos decimales en buf[2]
 static void u8_to_dec(uint8_t v, char* buf) {
     buf[0] = '0' + (v / 10);
     buf[1] = '0' + (v % 10);
+}
+
+// NUEVA FUNCIÓN AUXILIAR: Calcula el precio dinámico del ópalo para mostrarlo y venderlo
+static uint16_t calcular_valor_opalo(int idx) {
+    Opalo o;
+    generar_opalo(&o, items[idx].seed);
+    return (uint16_t)items[idx].peso * items[idx].tamanyo * o.brillo / 10;
+}
+
+// NUEVA FUNCIÓN AUXILIAR: Ejecuta la venta en la RAM virtual y reorganiza los slots
+static void vender_opalo_seleccionado(int idx_lista) {
+    Chunk todos[MAX_CAPTURAS];
+    int n = cargar_chunks(todos);
+
+    // Buscamos cuál es el índice real en save.c comparando la semilla
+    int slot_sram = -1;
+    for (int i = 0; i < n; i++) {
+        if (todos[i].seed == items[idx_lista].seed && todos[i].cortado) {
+            slot_sram = i;
+            break;
+        }
+    }
+
+    if (slot_sram == -1) return;
+
+    // 1. Añadimos el dinero en base a su valor
+    uint16_t valor = calcular_valor_opalo(idx_lista);
+    modificar_dinero((int32_t)valor);
+
+    // 2. Desplazamos todos los chunks hacia atrás en save.c para mantener la estructura secuencial libre de huecos
+    for (int i = slot_sram; i < n - 1; i++) {
+        sobreescribir_chunk(i, &todos[i + 1]);
+    }
+
+    // 3. Limpiamos el último hueco libre que ha quedado duplicado
+    Chunk vacio = {0};
+    sobreescribir_chunk(n - 1, &vacio);
+
+    // 4. Bajamos el contador general de chunks usando la función que preparamos para save.c
+    decrementar_num_chunks();
 }
 
 // -------------------------------------------------------
@@ -110,8 +153,12 @@ static void render_lista(void) {
 
     // Cabecera
     fill_rect(vram, 0, 0, 240, 12, 4);
-    draw_text(vram, 4,   2, "GALERIA",        255);
-    draw_text(vram, 130, 2, "DESCRIPCION",    255);
+    draw_text(vram, 4,   2, "GALERIA",    255);
+    
+    // NUEVO: Imprimir el dinero actual en la cabecera (alineado a la derecha)
+    char txt_dinero[16];
+    sprintf(txt_dinero, "ORO: %d", obtener_dinero());
+    draw_text(vram, 175, 2, txt_dinero, 255);
 
     // Divisor vertical
     vline(vram, LIST_W, 12, 148, 3);
@@ -180,17 +227,37 @@ static void render_lista(void) {
         u8_to_dec(o.saturacion, &sat[7]);
         draw_text(vram, x, y, sat, 255); y += 14;
 
-        // Valor estimado (peso * tamaño * brillo / 10)
-        uint16_t valor = (uint16_t)items[cursor].peso
-                       * items[cursor].tamanyo
-                       * o.brillo / 10;
-        char val[12] = "VALOR: XXX";
-        val[7] = '0' + (valor / 100) % 10;
-        val[8] = '0' + (valor /  10) % 10;
-        val[9] = '0' + (valor      ) % 10;
+        // Valor estimado
+        uint16_t valor = calcular_valor_opalo(cursor);
+        char val[14] = "VALOR: XXXX";
+        val[7]  = '0' + (valor / 1000) % 10;
+        val[8]  = '0' + (valor / 100) % 10;
+        val[9]  = '0' + (valor /  10) % 10;
+        val[10] = '0' + (valor       ) % 10;
         draw_text(vram, x, y, val, 255); y += 14;
 
-        draw_text(vram, x, y, "A:VER IMAGEN", 255);
+        draw_text(vram, x, y, "A:OPCIONES", 255); // Cambiado para indicar que abre submenú
+    }
+
+    // NUEVO: Si estamos en el estado submenú, pintamos la ventana emergente encima del panel derecho
+    if (vista == VISTA_SUBMENU) {
+        int sm_x = LIST_W + 10;
+        int sm_y = 100;
+        int sm_w = 105;
+        int sm_h = 42;
+
+        // Dibujamos el marco de la cajita del submenú
+        fill_rect(vram, sm_x, sm_y, sm_w, sm_h, 3);       // Borde exterior gris
+        fill_rect(vram, sm_x + 2, sm_y + 2, sm_w - 4, sm_h - 4, 5); // Fondo azul oscuro
+
+        // Dibujamos las opciones con el indicador astronómico '>'
+        if (opcion_submenu == 0) {
+            draw_text(vram, sm_x + 6, sm_y + 8,  "> VER IMAGEN", 255);
+            draw_text(vram, sm_x + 6, sm_y + 24, "  VENDER OPALO", 255);
+        } else {
+            draw_text(vram, sm_x + 6, sm_y + 8,  "  VER IMAGEN", 255);
+            draw_text(vram, sm_x + 6, sm_y + 24, "> VENDER OPALO", 255);
+        }
     }
 
     // Instrucciones pie
@@ -234,6 +301,7 @@ void galeria_init(void) {
     cursor = 0;
     scroll = 0;
     vista  = VISTA_LISTA;
+    opcion_submenu = 0;
     render_lista();
 }
 
@@ -243,7 +311,6 @@ void galeria_input(uint16_t keys) {
 
         if ((keys & KEY_DOWN) && cursor + 1 < num_items) {
             cursor++;
-            // Scroll si el cursor sale de la ventana visible
             if (cursor >= scroll + LIST_ITEMS)
                 scroll = cursor - LIST_ITEMS + 1;
             render_lista();
@@ -254,8 +321,33 @@ void galeria_input(uint16_t keys) {
             render_lista();
         }
         if ((keys & KEY_A) && num_items > 0) {
-            vista = VISTA_IMAGEN;
-            render_imagen(cursor);
+            // NUEVO: Al pulsar A abrimos el submenú en lugar de saltar directo a la imagen
+            vista = VISTA_SUBMENU;
+            opcion_submenu = 0; // Apunta a "VER" por defecto
+            render_lista();
+        }
+
+    } else if (vista == VISTA_SUBMENU) { // NUEVO BLOQUE DE CONTROL DEL SUBMENÚ
+
+        if ((keys & KEY_UP) || (keys & KEY_DOWN)) {
+            opcion_submenu = !opcion_submenu; // Cambia entre 0 (Ver) y 1 (Vender)
+            render_lista();
+        }
+        if (keys & KEY_B) {
+            vista = VISTA_LISTA; // Cancela el submenú y vuelve a la lista normal
+            render_lista();
+        }
+        if (keys & KEY_A) {
+            if (opcion_submenu == 0) {
+                // Opción VER IMAGEN
+                vista = VISTA_IMAGEN;
+                render_imagen(cursor);
+            } else {
+                // Opción VENDER ÓPALO
+                vender_opalo_seleccionado(cursor);
+                // Tras venderlo, refrescamos la galería completa para actualizar la lista
+                galeria_init(); 
+            }
         }
 
     } else {  // VISTA_IMAGEN
