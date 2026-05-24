@@ -9,16 +9,14 @@
 //
 // 0x00  SaveHeader  (12 bytes)
 // 0x10  uint32_t    num_chunks
-// 0x20  Chunk[8]    slots  (sizeof(Opalo) cada uno)
-// 0x0100 uint32_t   monedas
+// 0x20  Chunk[8]    slots  (9 bytes cada uno = 72 bytes)
 // -----------------------------------------------------
-#define SRAM_HEADER  0x00
-#define SRAM_NUM     0x10
-#define SRAM_SLOTS   0x20
-#define SRAM_MONEDAS 0x0100
+#define SRAM_HEADER    0x00
+#define SRAM_NUM       0x10
+#define SRAM_SLOTS     0x20
 
 #define SAVE_MAGIC   "OPAL"
-#define SAVE_VERSION  2
+#define SAVE_VERSION  2        // subimos versión por cambio de formato
 
 typedef struct {
     char     magic[4];
@@ -71,9 +69,6 @@ void save_init(void) {
 
     uint32_t cero = 0;
     sram_write(SRAM_BASE + SRAM_NUM, &cero, sizeof(uint32_t));
-
-    // Inicializar monedas a 0
-    sram_write(SRAM_BASE + SRAM_MONEDAS, &cero, sizeof(uint32_t));
 }
 
 // -----------------------------------------------------
@@ -130,20 +125,3 @@ void sobreescribir_chunk(int slot, const Chunk* c) {
     sram_write(SRAM_BASE + SRAM_SLOTS + slot * sizeof(Chunk),
                c, sizeof(Chunk));
 }
-
-// -----------------------------------------------------
-// MONEDAS
-// -----------------------------------------------------
-uint32_t cargar_monedas(void) {
-    save_init();
-    uint32_t val = 0;
-    sram_read(&val, SRAM_BASE + SRAM_MONEDAS, sizeof(uint32_t));
-    if (val == 0xFFFFFFFF) val = 0;
-    return val;
-}
-
-void guardar_monedas(uint32_t cantidad) {
-    save_init();
-    sram_write(SRAM_BASE + SRAM_MONEDAS, &cantidad, sizeof(uint32_t));
-}
-
