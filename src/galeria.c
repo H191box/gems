@@ -20,7 +20,7 @@
 #define LIST_W       115
 #define LIST_ITEM_H  14
 #define LIST_ITEMS    8   // filas visibles
-#define SCROLL_MAX   (MAX_CAPTURAS - LIST_ITEMS)
+#define SCROLL_MAX   (MAX_GALERIA - LIST_ITEMS)
 
 // Nombres de tipo
 static const char* NOMBRE_TIPO[4] = {
@@ -53,7 +53,7 @@ typedef enum {
 } VistaGaleria;
 
 static VistaGaleria vista;
-static Chunk        items[MAX_CAPTURAS];
+static Chunk        items[MAX_GALERIA];
 static int          num_items;
 static int          cursor;
 static int          scroll;    // primera fila visible
@@ -87,16 +87,6 @@ static void put_pixel(uint16_t* vram, int x, int y, uint8_t c) {
     else        vram[idx] = (vram[idx] & 0xFF00) | c;
 }
 
-static void fill_rect(uint16_t* vram, int x, int y,
-                      int w, int h, uint8_t c) {
-    for (int yy = y; yy < y + h; yy++)
-        for (int xx = x; xx < x + w; xx++)
-            put_pixel(vram, xx, yy, c);
-}
-
-static void vline(uint16_t* vram, int x, int y, int h, uint8_t c) {
-    for (int yy = y; yy < y + h; yy++) put_pixel(vram, x, yy, c);
-}
 
 static void u8_to_dec(uint8_t v, char* buf) {
     buf[0] = '0' + (v / 10);
@@ -145,7 +135,7 @@ static uint16_t calcular_valor_opalo(int idx) {
 }
 // NUEVA FUNCIÓN AUXILIAR: Ejecuta la venta en la RAM virtual y reorganiza los slots
 static void vender_opalo_seleccionado(int idx_lista) {
-    Chunk todos[MAX_CAPTURAS];
+    Chunk todos[MAX_GALERIA];
     int n = cargar_chunks(todos);
 
     // Buscamos cuál es el índice real en save.c comparando la semilla
@@ -322,7 +312,7 @@ static void render_imagen(int idx) {
 // -------------------------------------------------------
 void galeria_init(void) {
     // Solo mostramos los chunks ya cortados
-    Chunk todos[MAX_CAPTURAS];
+    Chunk todos[MAX_GALERIA];
     int n = cargar_chunks(todos);
     num_items = 0;
     for (int i = 0; i < n; i++) {

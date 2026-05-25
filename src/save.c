@@ -8,9 +8,9 @@
 #define SRAM_HEADER       0x00
 #define SRAM_NUM_GAL      0x10 // Contador Galería
 #define SRAM_NUM_TALLER   0x14 // Contador Taller
-#define SRAM_SLOTS_GAL    0x20 // Espacio Galería
-#define SRAM_SLOTS_TALLER 0x80 // Espacio Taller (empieza en 0x80)
-#define SRAM_DINERO       0xE0 // Dinero desplazado al final
+#define SRAM_SLOTS_GAL    0x40
+#define SRAM_SLOTS_TALLER 0x400
+#define SRAM_DINERO       0x1200
 
 #define SAVE_MAGIC   "OPAL"
 #define SAVE_VERSION 3 
@@ -57,7 +57,7 @@ int cargar_chunks(Chunk* slots) {
     save_init();
     uint32_t n = 0;
     sram_read(&n, SRAM_BASE + SRAM_NUM_GAL, sizeof(uint32_t));
-    if (n > MAX_CAPTURAS) n = 0;
+    if (n > MAX_GALERIA) n = 0;
     for (uint32_t i = 0; i < n; i++) {
         sram_read(&slots[i], SRAM_BASE + SRAM_SLOTS_GAL + i * sizeof(Chunk), sizeof(Chunk));
     }
@@ -68,7 +68,7 @@ void guardar_chunk(const Chunk* c) {
     save_init();
     uint32_t n = 0;
     sram_read(&n, SRAM_BASE + SRAM_NUM_GAL, sizeof(uint32_t));
-    if (n >= MAX_CAPTURAS) return;
+    if (n >= MAX_GALERIA) return;
     sram_write(SRAM_BASE + SRAM_SLOTS_GAL + n * sizeof(Chunk), c, sizeof(Chunk));
     n++;
     sram_write(SRAM_BASE + SRAM_NUM_GAL, &n, sizeof(uint32_t));
@@ -76,7 +76,7 @@ void guardar_chunk(const Chunk* c) {
 
 void sobreescribir_chunk(int slot, const Chunk* c) {
     save_init();
-    if (slot < 0 || slot >= MAX_CAPTURAS) return;
+    if (slot < 0 || slot >= MAX_GALERIA) return;
     sram_write(SRAM_BASE + SRAM_SLOTS_GAL + slot * sizeof(Chunk), c, sizeof(Chunk));
 }
 
@@ -95,7 +95,7 @@ int cargar_chunks_taller(Chunk* slots) {
     save_init();
     uint32_t n = 0;
     sram_read(&n, SRAM_BASE + SRAM_NUM_TALLER, sizeof(uint32_t));
-    if (n > MAX_CAPTURAS) n = 0;
+    if (n > MAX_TALLER) n = 0;
     for (uint32_t i = 0; i < n; i++) {
         sram_read(&slots[i], SRAM_BASE + SRAM_SLOTS_TALLER + i * sizeof(Chunk), sizeof(Chunk));
     }
@@ -106,7 +106,7 @@ void guardar_chunk_taller(const Chunk* c) {
     save_init();
     uint32_t n = 0;
     sram_read(&n, SRAM_BASE + SRAM_NUM_TALLER, sizeof(uint32_t));
-    if (n >= MAX_CAPTURAS) return;
+    if (n >= MAX_TALLER) return;
     sram_write(SRAM_BASE + SRAM_SLOTS_TALLER + n * sizeof(Chunk), c, sizeof(Chunk));
     n++;
     sram_write(SRAM_BASE + SRAM_NUM_TALLER, &n, sizeof(uint32_t));

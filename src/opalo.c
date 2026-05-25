@@ -52,3 +52,11 @@ void generar_chunk(Chunk* c, uint32_t seed) {
     else
         c->pista = 0;
 }
+
+uint16_t calcular_valor_chunk(const Chunk* c) {
+    uint16_t valor = 0;
+    valor += c->peso * 3;
+    valor += c->tamanyo * 5;
+    valor += c->grietas * 12;
+    return valor;
+}

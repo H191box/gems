@@ -35,10 +35,10 @@ void dibujar_menu(int opcion) {
     int y_start = 28;
     int espacio = 32;
 
-    char* opciones_txt[] = {"FARMEO", "TALLER", "GALERIA", "VIAJAR"};
-    char* desc_txt[] = {"BUSCA ROCAS", "CORTA CHUNKS", "TUS OPALOS", "CAMBIAR ZONA"};
+    char* opciones_txt[] = {"FARMEO", "TALLER", "GALERIA", "TIENDA", "VIAJAR"};
+    char* desc_txt[] = {"BUSCA ROCAS", "CORTA CHUNKS", "TUS OPALOS", "COMPRAR SACOS", "CAMBIAR ZONA"};
 
-    for(int i = 0; i < 4; i++) {
+    for(int i = 0; i < 5; i++) {
         uint8_t col = (opcion == i) ? 3 : 2;
         rect(vram, 8, y_start + (espacio * i), 224, h_celda, col);
         draw_text(vram, 16, y_start + (espacio * i) + 4, opciones_txt[i], 255);

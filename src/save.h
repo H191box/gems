@@ -5,7 +5,8 @@
 #include "opalo.h"
 
 // Definiciones de capacidad
-#define MAX_CAPTURAS 8 // Usado tanto para Galería como para Taller
+#define MAX_GALERIA 32
+#define MAX_TALLER 64
 
 // Funciones de inicialización y semillas
 void     save_init(void); 

@@ -55,3 +55,5 @@ void generar_opalo(Opalo* o, uint32_t seed);
 void generar_chunk(Chunk* c, uint32_t seed);
 
 #endif
+
+uint16_t calcular_valor_chunk(const Chunk* c);

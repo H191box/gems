@@ -7,7 +7,8 @@ typedef enum {
     ESTADO_TALLER, 
     ESTADO_GALERIA, 
     ESTADO_SELECTOR, 
-    ESTADO_VIAJAR 
+    ESTADO_VIAJAR,
+    ESTADO_TIENDA 
 } EstadoJuego;
 
 #endif
