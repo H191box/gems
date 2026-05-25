@@ -107,9 +107,42 @@ static void u8_to_dec(uint8_t v, char* buf) {
 static uint16_t calcular_valor_opalo(int idx) {
     Opalo o;
     generar_opalo(&o, items[idx].seed);
-    return (uint16_t)items[idx].peso * items[idx].tamanyo * o.brillo / 10;
-}
 
+    // Precio base por karat según tipo (de menos a más valioso)
+    uint16_t precio_karat;
+    switch (o.tipo) {
+        case 0: precio_karat = 8;  break; // OPALO NEGRO   - el más valioso de base
+        case 2: precio_karat = 6;  break; // OPALO FUEGO
+        case 1: precio_karat = 4;  break; // OPALO CRISTAL
+        default:precio_karat = 2;  break; // OPALO BLANCO  - el más común
+    }
+
+    // Modificador de brillo: brillo va de 16 a 31
+    // brillo 16 → ×0.8,  brillo 31 → ×1.5 aprox
+    // Usamos factor entero: (brillo * 10) / 20 → rango 8-15, /10 al final
+    uint16_t mod_brillo = (uint16_t)o.brillo * 10 / 20; // 8-15
+
+    // Modificador de saturación: igual de rango
+    uint16_t mod_sat = (uint16_t)o.saturacion * 10 / 20; // 8-15
+
+    // Bonus por patrón (algunos patrones son más raros y cotizados)
+    uint16_t bonus_patron;
+    switch (o.patron) {
+        case 3: bonus_patron = 4; break; // CHAOS   - muy raro
+        case 1: bonus_patron = 3; break; // VENAS
+        case 2: bonus_patron = 2; break; // MOSAICO
+        default:bonus_patron = 1; break; // NEBULA  - común
+    }
+
+    // precio_karat final = base * mod_brillo * mod_sat / 100 + bonus_patron
+    precio_karat = (uint16_t)(precio_karat * mod_brillo * mod_sat / 100) + bonus_patron;
+    if (precio_karat < 1) precio_karat = 1;
+
+    // Karats = tamanyo × peso (ambos 1-10 aprox, tamanyo 1-5)
+    uint16_t karats = (uint16_t)items[idx].tamanyo * items[idx].peso;
+
+    return precio_karat * karats;
+}
 // NUEVA FUNCIÓN AUXILIAR: Ejecuta la venta en la RAM virtual y reorganiza los slots
 static void vender_opalo_seleccionado(int idx_lista) {
     Chunk todos[MAX_CAPTURAS];

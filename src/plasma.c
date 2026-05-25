@@ -1,3 +1,5 @@
+// 2.0
+
 #include <stdint.h>
 #include <gba_video.h>
 #include "video.h"
@@ -83,7 +85,7 @@ void generar_paleta(Opalo* o) {
 
 /* ---------------- PALETA ROCA ---------------- */
 
-static void aplicar_paleta_roca(uint8_t pista) {
+static void aplicar_paleta_roca(const Opalo* o) {
     uint16_t* pal = (uint16_t*)0x05000000;
 
     // Grises para la textura (índices 10-29)
@@ -95,16 +97,30 @@ static void aplicar_paleta_roca(uint8_t pista) {
     pal[0]   = 0x0000; // negro
     pal[255] = 0x7FFF; // blanco texto
 
-    // Colores de pista (31-34): saturados pero oscuros
-    pal[30] = 0x0000;
-    pal[31] = (0  & 31) | ((8  & 31) << 5) | ((20 & 31) << 10); // azul
-    pal[32] = (20 & 31) | ((6  & 31) << 5) | ((0  & 31) << 10); // rojo/naranja
-    pal[33] = (0  & 31) | ((14 & 31) << 5) | ((12 & 31) << 10); // verde-azul
-    pal[34] = (12 & 31) | ((0  & 31) << 5) | ((16 & 31) << 10); // violeta
-
-    (void)pista;
+    // Color de grieta según tipo de ópalo interior
+    // Saturados y visibles sobre la roca gris
+// Color de grieta según tipo de ópalo interior
+    uint16_t color_grieta;
+    switch (o->tipo) {
+        case OPALO_NEGRO:
+            // Rojo muy oscuro
+            color_grieta = (14 & 31) | ((2 & 31) << 5) | ((2 & 31) << 10);
+            break;
+        case OPALO_CRISTAL:
+            // Blanco azulado
+            color_grieta = (24 & 31) | ((26 & 31) << 5) | ((31 & 31) << 10);
+            break;
+        case OPALO_FUEGO:
+            // Marrón amarillento / gris anaranjado cálido
+            color_grieta = (26 & 31) | ((20 & 31) << 5) | ((10 & 31) << 10);
+            break;
+        default:
+            // Blanco con ligero toque verdoso
+            color_grieta = (28 & 31) | ((31 & 31) << 5) | ((28 & 31) << 10);
+            break;
+    }
+    pal[31] = color_grieta;
 }
-
 /* ---------------- GRIETAS ---------------- */
 
 static uint8_t grieta_buf[160][240] __attribute__((section(".ewram")));
@@ -116,19 +132,26 @@ static uint32_t rng_next(uint32_t* s) {
     return *s;
 }
 
-static void precalcular_grietas(uint32_t seed, uint8_t num_grietas) {
+static void precalcular_grietas(uint32_t seed, uint8_t num_grietas, uint8_t tamanyo) {
     for (int y = 0; y < 160; y++)
         for (int x = 0; x < 240; x++)
             grieta_buf[y][x] = 0;
 
     if (num_grietas == 0) return;
+// Longitud reducida: ahora tamanyo 1 → (15-25px), tamanyo 5 → (55-85px)
+    int len_base = 15 + (tamanyo - 1) * 10;
+    int len_rand = 10 + (tamanyo - 1) * 5;
+
+    // Grosor máximo limitado a 2: 
+    // tamanyo 1-2 → 1px, tamanyo 3-5 → 2px
+    int grosor = (tamanyo >= 3) ? 2 : 1;
 
     for (uint8_t g = 0; g < num_grietas; g++) {
         uint32_t s = seed ^ (0x1234 * (g + 1));
 
         int cx      = (int)(rng_next(&s) % 200) + 20;
         int cy      = (int)(rng_next(&s) % 120) + 20;
-        int len     = 40 + (int)(rng_next(&s) % 50);
+        int len     = len_base + (int)(rng_next(&s) % len_rand);
         int dx      = (rng_next(&s) & 1) ? 1 : -1;
         int dy_base = (int)(rng_next(&s) % 3) - 1;
 
@@ -137,10 +160,15 @@ static void precalcular_grietas(uint32_t seed, uint8_t num_grietas) {
             if ((i & 3) == 0)
                 dy += (int)(rng_next(&s) % 3) - 1;
 
-            if (cx >= 0 && cx < 240 && cy >= 0 && cy < 160)
-                grieta_buf[cy][cx] = 1;
-            if (cx >= 0 && cx < 240 && cy + 1 >= 0 && cy + 1 < 160)
-                grieta_buf[cy + 1][cx] = 1;
+            // Dibujar con grosor máximo 2
+            for (int gy = 0; gy < grosor; gy++) {
+                for (int gx = 0; gx < grosor; gx++) {
+                    int px = cx + gx;
+                    int py = cy + gy;
+                    if (px >= 0 && px < 240 && py >= 0 && py < 160)
+                        grieta_buf[py][px] = 1;
+                }
+            }
 
             cx += dx;
             cy += dy;
@@ -152,12 +180,15 @@ static void precalcular_grietas(uint32_t seed, uint8_t num_grietas) {
 /* ---------------- RENDER ROCA ---------------- */
 
 void renderizar_roca(const Chunk* c) {
-    aplicar_paleta_roca(c->pista);
-    precalcular_grietas(c->seed, c->grietas);
+    // Generamos el ópalo interior para conocer su tipo y colorear las grietas
+    Opalo o_interior;
+    generar_opalo(&o_interior, c->seed);
+
+    aplicar_paleta_roca(&o_interior);
+    precalcular_grietas(c->seed, c->grietas, c->tamanyo);
 
     uint16_t* vram = get_vram();
     uint8_t off = (uint8_t)(c->seed ^ (c->seed >> 16));
-    uint8_t color_grieta = (c->pista > 0) ? (30 + c->pista) : 12;
 
     for (int y = 0; y < 160; y++) {
         for (int x = 0; x < 240; x += 2) {
@@ -166,8 +197,8 @@ void renderizar_roca(const Chunk* c) {
             uint8_t c1 = 10 + (v1 >> 4) % 20;
             uint8_t c2 = 10 + (v2 >> 4) % 20;
 
-            if (grieta_buf[y][x])     c1 = color_grieta;
-            if (grieta_buf[y][x + 1]) c2 = color_grieta;
+            if (grieta_buf[y][x])     c1 = 31; // índice 31 = color del tipo de ópalo
+            if (grieta_buf[y][x + 1]) c2 = 31;
 
             vram[(y * 120) + (x / 2)] = (c2 << 8) | c1;
         }

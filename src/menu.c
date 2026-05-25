@@ -1,7 +1,7 @@
 #include <stdint.h>
 #include <gba_video.h>
 #include <gba_input.h>
-#include "video.h" // Aquí ya están declaradas rect() y clear()
+#include "video.h"
 #include "font.h"
 #include "save.h"
 #include "data.h"
@@ -10,23 +10,21 @@
 extern int ciudad_actual;
 extern const Ciudad ciudades[3];
 
-// Nueva función de paleta dinámica
 void aplicar_paleta_segun_ciudad(int idx) {
     volatile uint16_t* pal = (volatile uint16_t*)0x05000000;
     uint16_t color = ciudades[idx].color_paleta;
 
-    pal[0] = 0x0000;          // Negro
-    pal[1] = color & 0x7BE0;  // Variante oscura
-    pal[2] = color;           // Color principal
-    pal[3] = color | 0x0200;  // Tono extra
-    pal[255] = 0x7FFF;        // Blanco
+    pal[0]   = 0x0000;               // Negro (fondo)
+    pal[1]   = color;                // Color principal (cabecera)
+    pal[2]   = (color >> 1) & 0x3DEF; // Más oscuro (celdas normales)
+    pal[3]   = color + 0x0318;       // Más claro/saturado (celda seleccionada)
+    pal[255] = 0x7FFF;               // Blanco (texto)
 }
 
 void dibujar_menu(int opcion) {
     aplicar_paleta_segun_ciudad(ciudad_actual);
     
     uint16_t* vram = get_vram();
-    // Como ya incluiste "video.h", puedes usar clear y rect directamente
     clear(vram, 0); 
 
     rect(vram, 0, 0, 240, 20, 1);
