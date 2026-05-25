@@ -1,8 +1,3 @@
-// -------------------------------------------------------
-//2.0 2.0 2.0 2.0
-//
-
-
 #include <stdint.h>
 #include <gba_video.h>
 #include <gba_input.h>
@@ -10,40 +5,40 @@
 #include "plasma.h"
 #include "save.h"
 #include "video.h"
+#include "viajar.h"
 #include "galeria.h"
 #include "font.h"
 #include "opalo.h"
+#include "data.h"
+#include "game_state.h"
 
-typedef enum {
-    ESTADO_MENU,
-    ESTADO_FARMEO,
-    ESTADO_TALLER,
-    ESTADO_GALERIA,
-    ESTADO_SELECTOR
-} EstadoJuego;
+// --- VARIABLES GLOBALES (Sin static para que sean visibles por otros archivos) ---
+int ciudad_actual = 0;
+int opcion_menu   = 0;
+EstadoJuego estado = ESTADO_MENU;
 
+// --- VARIABLES LOCALES (static se mantiene aquí porque solo main.c las usa) ---
 static uint32_t semilla_actual;
-static int      opcion_menu   = 0;
 static int      slot_cursor   = 0;
 static Chunk    chunk_actual;
 static Opalo    opalo_actual;
 
-// -------------------------------------------------------
-// Taller: solo chunks sin cortar
-// -------------------------------------------------------
+// --- NUEVA ESTRUCTURA PARA EL TALLER ---
 static Chunk taller_slots[MAX_CAPTURAS];
 static int   taller_n      = 0;
 static int   taller_cursor = 0;
 
+
+
+// -------------------------------------------------
+// ESTRUCTURAS Y PROTOTIPOS
+// -------------------------------------------------
+
+static void aplicar_paleta_selector(void);
+
+
 static void taller_recargar(void) {
-    Chunk todos[MAX_CAPTURAS];
-    int n = cargar_chunks(todos);
-    taller_n = 0;
-    for (int i = 0; i < n; i++) {
-        if (!todos[i].cortado) {
-            taller_slots[taller_n++] = todos[i];
-        }
-    }
+    taller_n = cargar_chunks_taller(taller_slots);
 }
 
 // -------------------------------------------------------
@@ -76,19 +71,6 @@ static void aplicar_paleta_selector(void) {
     pal[3]   = 0x681F;
     pal[4]   = 0x4210;
     pal[255] = 0x7FFF;
-}
-
-// -------------------------------------------------------
-// Rectangulo simple
-// -------------------------------------------------------
-static void rect(uint16_t* vram, int x, int y,
-                 int w, int h, uint8_t color) {
-    uint16_t packed = (color << 8) | color;
-    int x0 = x & ~1;
-    int x1 = (x + w + 1) & ~1;
-    for (int yy = y; yy < y + h; yy++)
-        for (int xx = x0; xx < x1; xx += 2)
-            vram[yy * 120 + xx / 2] = packed;
 }
 
 // -------------------------------------------------------
@@ -165,7 +147,7 @@ int main() {
     semilla_actual = cargar_seed();
     generar_chunk(&chunk_actual, semilla_actual);
 
-    EstadoJuego estado = ESTADO_MENU;
+    // 'estado' ya es la variable global de arriba, no se redeclara aquí
     dibujar_menu(opcion_menu);
     flip();
 
@@ -174,181 +156,127 @@ int main() {
         uint16_t keys = keysDown();
 
         switch (estado) {
-
         // -------------------------------------------------
         // MENU
         // -------------------------------------------------
         case ESTADO_MENU:
-            if (keys & KEY_UP) {
-                opcion_menu--;
-                if (opcion_menu < 0) opcion_menu = 2;
-                dibujar_menu(opcion_menu);
-                flip();
+            if (keys & KEY_UP) { 
+                opcion_menu = (opcion_menu <= 0) ? 3 : opcion_menu - 1; 
+                dibujar_menu(opcion_menu); flip(); 
             }
-            if (keys & KEY_DOWN) {
-                opcion_menu++;
-                if (opcion_menu > 2) opcion_menu = 0;
-                dibujar_menu(opcion_menu);
-                flip();
+            if (keys & KEY_DOWN) { 
+                opcion_menu = (opcion_menu >= 3) ? 0 : opcion_menu + 1; 
+                dibujar_menu(opcion_menu); flip(); 
             }
             if (keys & KEY_A) {
-                if (opcion_menu == 0) {
-                    estado = ESTADO_FARMEO;
-                    refrescar_chunk();
-                } else if (opcion_menu == 1) {
-                    taller_recargar();
-                    taller_cursor = 0;
-                    estado = ESTADO_TALLER;
-                    dibujar_taller(taller_cursor);
-                } else {
-                    estado = ESTADO_GALERIA;
-                    galeria_init();
-                }
+                if (opcion_menu == 0) { estado = ESTADO_FARMEO; refrescar_chunk(); }
+                else if (opcion_menu == 1) { taller_recargar(); taller_cursor = 0; estado = ESTADO_TALLER; dibujar_taller(taller_cursor); }
+                else if (opcion_menu == 2) { estado = ESTADO_GALERIA; galeria_init(); }
+         	 else { estado = ESTADO_VIAJAR; viajar_init(); }
             }
             break;
 
-// -------------------------------------------------
-// FARMEO
-// -------------------------------------------------
-case ESTADO_FARMEO:
-    if (keys & KEY_B) {
-        semilla_actual += 0x9E3779B9;
-        refrescar_chunk();
-    }
-    if (keys & KEY_A) {
-        if (chunk_actual.grietas == 0) break;
-
-        // Contar solo chunks sin cortar (los del taller)
-        Chunk slots[MAX_CAPTURAS];
-        int n = cargar_chunks(slots);
-        int sin_cortar = 0;
-        for (int i = 0; i < n; i++)
-            if (!slots[i].cortado) sin_cortar++;
-
-        if (sin_cortar < MAX_CAPTURAS) {
-            guardar_seed(semilla_actual);
-            guardar_chunk(&chunk_actual);
-            flash_guardado();
-            semilla_actual += 0x9E3779B9;
-            refrescar_chunk();
-        } else {
-            slot_cursor = 0;
-            estado = ESTADO_SELECTOR;
-            dibujar_selector(slot_cursor);
-        }
-    }
-    if (keys & KEY_START) {
-        estado = ESTADO_MENU;
-        dibujar_menu(opcion_menu);
-        flip();
-    }
-    break;
-
-// -------------------------------------------------
-// SELECTOR (galería llena)
-// -------------------------------------------------
-case ESTADO_SELECTOR:
-    if (keys & KEY_RIGHT) {
-        if ((slot_cursor % 2) == 0) slot_cursor++;
-        dibujar_selector(slot_cursor);
-    }
-    if (keys & KEY_LEFT) {
-        if ((slot_cursor % 2) == 1) slot_cursor--;
-        dibujar_selector(slot_cursor);
-    }
-    if (keys & KEY_DOWN) {
-        if (slot_cursor + 2 < MAX_CAPTURAS) slot_cursor += 2;
-        dibujar_selector(slot_cursor);
-    }
-    if (keys & KEY_UP) {
-        if (slot_cursor >= 2) slot_cursor -= 2;
-        dibujar_selector(slot_cursor);
-    }
-    if (keys & KEY_A) {
-        guardar_seed(semilla_actual);
-        sobreescribir_chunk(slot_cursor, &chunk_actual);
-        flash_guardado();
-        // Avanzar igual que al guardar normal
-        semilla_actual += 0x9E3779B9;
-        estado = ESTADO_FARMEO;
-        refrescar_chunk();
-    }
-    if (keys & KEY_B) {
-        estado = ESTADO_FARMEO;
-        refrescar_chunk();
-    }
-    break;
+        // -------------------------------------------------
+        // VIAJAR
+        // -------------------------------------------------
+        case ESTADO_VIAJAR:
+            if (keys & KEY_START) {
+                estado = ESTADO_MENU;
+                dibujar_menu(opcion_menu);
+                flip();
+            } else {
+                viajar_input(keys);
+            }
+            break;
 
         // -------------------------------------------------
-        // TALLER
+        // FARMEO
         // -------------------------------------------------
-        case ESTADO_TALLER:
-            if (keys & KEY_RIGHT) {
-                if ((taller_cursor % 2) == 0 &&
-                     taller_cursor + 1 < taller_n)
-                    taller_cursor++;
-                dibujar_taller(taller_cursor);
+        case ESTADO_FARMEO:
+            if (keys & KEY_B) {
+                semilla_actual += 0x9E3779B9;
+                refrescar_chunk();
             }
-            if (keys & KEY_LEFT) {
-                if ((taller_cursor % 2) == 1) taller_cursor--;
-                dibujar_taller(taller_cursor);
-            }
-            if (keys & KEY_DOWN) {
-                if (taller_cursor + 2 < taller_n) taller_cursor += 2;
-                dibujar_taller(taller_cursor);
-            }
-            if (keys & KEY_UP) {
-                if (taller_cursor >= 2) taller_cursor -= 2;
-                dibujar_taller(taller_cursor);
-            }
-            if ((keys & KEY_A) && taller_n > 0) {
-                // Mostrar el ópalo
-                mostrar_opalo_chunk(&taller_slots[taller_cursor]);
+            if (keys & KEY_A) {
+                if (chunk_actual.grietas == 0) break;
+                Chunk temp_taller[MAX_CAPTURAS];
+                int n = cargar_chunks_taller(temp_taller);
 
-                // Buscar en SRAM por seed y marcar cortado
-                Chunk todos[MAX_CAPTURAS];
-                int n = cargar_chunks(todos);
-                for (int i = 0; i < n; i++) {
-                    if (todos[i].seed == taller_slots[taller_cursor].seed) {
-                        todos[i].cortado = 1;
-                        sobreescribir_chunk(i, &todos[i]);
-                        break;
-                    }
+                if (n < MAX_CAPTURAS) {
+                    guardar_seed(semilla_actual);
+                    guardar_chunk_taller(&chunk_actual);
+                    flash_guardado();
+                    semilla_actual += 0x9E3779B9;
+                    refrescar_chunk();
+                } else {
+                    slot_cursor = 0;
+                    estado = ESTADO_SELECTOR;
+                    dibujar_selector(slot_cursor);
                 }
-
-                // Esperar START para volver
-                while (1) {
-                    scanKeys();
-                    if (keysDown() & KEY_START) break;
-                }
-
-                // Recargar taller sin el chunk recién cortado
-                taller_recargar();
-                if (taller_cursor >= taller_n)
-                    taller_cursor = taller_n > 0 ? taller_n - 1 : 0;
-
-                estado = ESTADO_TALLER;
-                dibujar_taller(taller_cursor);
             }
             if (keys & KEY_START) {
                 estado = ESTADO_MENU;
                 dibujar_menu(opcion_menu);
                 flip();
             }
+            break;
+
+        // -------------------------------------------------
+        // SELECTOR (galería llena)
+        // -------------------------------------------------
+        case ESTADO_SELECTOR:
+            if (keys & KEY_RIGHT) { if ((slot_cursor % 2) == 0) slot_cursor++; dibujar_selector(slot_cursor); }
+            if (keys & KEY_LEFT) { if ((slot_cursor % 2) == 1) slot_cursor--; dibujar_selector(slot_cursor); }
+            if (keys & KEY_DOWN) { if (slot_cursor + 2 < MAX_CAPTURAS) slot_cursor += 2; dibujar_selector(slot_cursor); }
+            if (keys & KEY_UP) { if (slot_cursor >= 2) slot_cursor -= 2; dibujar_selector(slot_cursor); }
+            if (keys & KEY_A) {
+                guardar_seed(semilla_actual);
+                flash_guardado();
+                semilla_actual += 0x9E3779B9;
+                estado = ESTADO_FARMEO;
+                refrescar_chunk();
+            }
+            if (keys & KEY_B) { estado = ESTADO_FARMEO; refrescar_chunk(); }
+            break;
+
+        // -------------------------------------------------
+        // TALLER
+        // -------------------------------------------------
+        case ESTADO_TALLER:
+            if (keys & KEY_RIGHT) { if ((taller_cursor % 2) == 0 && taller_cursor + 1 < taller_n) taller_cursor++; dibujar_taller(taller_cursor); }
+            if (keys & KEY_LEFT) { if ((taller_cursor % 2) == 1) taller_cursor--; dibujar_taller(taller_cursor); }
+            if (keys & KEY_DOWN) { if (taller_cursor + 2 < taller_n) taller_cursor += 2; dibujar_taller(taller_cursor); }
+            if (keys & KEY_UP) { if (taller_cursor >= 2) taller_cursor -= 2; dibujar_taller(taller_cursor); }
+
+            if ((keys & KEY_A) && taller_n > 0) {
+                mostrar_opalo_chunk(&taller_slots[taller_cursor]);
+                Chunk c = taller_slots[taller_cursor];
+                c.cortado = 1;
+                guardar_chunk(&c);
+                reset_taller();
+                for(int i = 0; i < taller_n; i++) if(i != taller_cursor) guardar_chunk_taller(&taller_slots[i]);
+                while (1) { scanKeys(); if (keysDown() & KEY_START) break; }
+                taller_recargar();
+                if (taller_cursor >= taller_n) taller_cursor = taller_n > 0 ? taller_n - 1 : 0;
+                dibujar_taller(taller_cursor);
+            }
+            if (keys & KEY_START) { estado = ESTADO_MENU; dibujar_menu(opcion_menu); flip(); }
             break;
 
         // -------------------------------------------------
         // GALERIA
         // -------------------------------------------------
         case ESTADO_GALERIA:
-            if (keys & KEY_START) {
-                estado = ESTADO_MENU;
-                dibujar_menu(opcion_menu);
-                flip();
-            } else {
-                galeria_input(keys);
+            if (keys & KEY_START) { 
+                estado = ESTADO_MENU; 
+                dibujar_menu(opcion_menu); 
+                flip(); 
+            } else { 
+                galeria_input(keys); 
             }
             break;
-        }
-    }
-}
+
+        } // Fin del switch
+    } // Fin del while(1)
+    return 0;
+} // Fin del main
