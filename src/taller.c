@@ -13,7 +13,6 @@
 #define LIST_ITEM_H 14
 #define LIST_ITEMS  8
 
-// x_pos de la miniatura: par, primer valor tras el divisor
 #define THUMB_X     146
 #define THUMB_Y      18
 
@@ -22,41 +21,31 @@ static int   num_taller;
 static int   cursor;
 static int   scroll;
 
-// -------------------------------------------------------
-// SUBMENU
-// -------------------------------------------------------
 typedef enum {
     TALLER_LISTA,
     TALLER_SUBMENU
 } VistaTaller;
 
 static VistaTaller vista_taller;
-static int         opcion_submenu; // 0 = CORTAR, 1 = MOVER A GALERIA
+static int         opcion_submenu;
 
-// -------------------------------------------------------
-// PALETA UI (igual que en galeria.c)
-// -------------------------------------------------------
 static void init_paleta_ui(void) {
     volatile uint16_t* pal = (volatile uint16_t*)0x05000000;
-    pal[0]  = 0x0000;  // negro — fondo
-    pal[1]  = 0x294A;  // gris oscuro — fila normal
-    pal[2]  = 0x681F;  // morado — fila seleccionada
-    pal[3]  = 0x4210;  // gris — divisor
-    pal[4]  = 0x6810;  // azul — cabecera
-    pal[5]  = 0x1F00;  // azul oscuro — fondo submenú
+    pal[0]  = 0x0000;
+    pal[1]  = 0x294A;
+    pal[2]  = 0x681F;
+    pal[3]  = 0x4210;
+    pal[4]  = 0x6810;
+    pal[5]  = 0x1F00;
     for (int i = 6; i <= 15; i++) pal[i] = 0x0000;
-    pal[255] = 0x7FFF; // blanco texto
+    pal[255] = 0x7FFF;
 }
 
-// -------------------------------------------------------
-// RENDER TALLER
-// -------------------------------------------------------
 static void render_taller(void) {
     init_paleta_ui();
     uint16_t* vram = get_vram();
     clear(vram, 0);
 
-    // Cabecera
     fill_rect(vram, 0, 0, 240, 12, 4);
     draw_text(vram, 4, 2, "TALLER - CORTAR", 255);
     vline(vram, LIST_W, 12, 148, 3);
@@ -68,7 +57,6 @@ static void render_taller(void) {
         return;
     }
 
-    // Lista de chunks
     for (int i = 0; i < LIST_ITEMS; i++) {
         int idx = scroll + i;
         if (idx >= num_taller) break;
@@ -82,21 +70,17 @@ static void render_taller(void) {
         draw_text(vram, 4, y + 3, label, 255);
     }
 
-    // Indicadores de scroll
     if (scroll > 0)
         draw_text(vram, LIST_W / 2 - 4, 13,  "^", 255);
     if (scroll + LIST_ITEMS < num_taller)
         draw_text(vram, LIST_W / 2 - 4, 150, "v", 255);
 
-    // Panel derecho: miniatura + datos
     if (cursor < num_taller) {
         Chunk* c = &taller_items[cursor];
 
-        // 1. Miniatura de la roca (paleta roca → render → restaurar UI)
         renderizar_roca_pequena(THUMB_X, THUMB_Y, c);
         init_paleta_ui();
 
-        // 2. Datos debajo de la miniatura
         int x = LIST_W + 4;
         int y = 105;
 
@@ -110,7 +94,6 @@ static void render_taller(void) {
         sprintf(buf, "GRIETAS:%d", c->grietas);
         draw_text(vram, x, y, buf, 255); y += 14;
 
-        // Pista del tipo interior si hay grieta
         if (c->grietas > 0 && c->pista > 0) {
             static const char* PISTA_TEXTO[5] = {
                 "", "NEGRO?", "CRISTAL?", "FUEGO?", "BLANCO?"
@@ -122,7 +105,6 @@ static void render_taller(void) {
         draw_text(vram, x, y, "A:OPCIONES", 255);
     }
 
-    // Submenú emergente
     if (vista_taller == TALLER_SUBMENU) {
         int sm_x = LIST_W + 10;
         int sm_y = 100;
@@ -145,15 +127,11 @@ static void render_taller(void) {
     flip();
 }
 
-// -------------------------------------------------------
-// CORTAR CHUNK (lógica original)
-// -------------------------------------------------------
 static void cortar_chunk_seleccionado(void) {
     Chunk c = taller_items[cursor];
     c.cortado = 1;
     guardar_chunk(&c);
 
-    // Reconstruir taller sin el chunk cortado
     reset_taller();
     for (int i = 0; i < num_taller; i++) {
         if (i != cursor) guardar_chunk_taller(&taller_items[i]);
@@ -162,18 +140,10 @@ static void cortar_chunk_seleccionado(void) {
     taller_recargar();
 }
 
-// -------------------------------------------------------
-// MOVER A GALERIA sin cortar
-// El chunk pasa a galería con cortado=0 para que aparezca
-// en la lista junto a los ópalos. El precio se ajustará
-// más adelante desde galería.
-// -------------------------------------------------------
 static void mover_a_galeria(void) {
     Chunk c = taller_items[cursor];
-    // cortado se deja en 0 — galería mostrará ambos tipos
     guardar_chunk(&c);
 
-    // Eliminar del taller
     reset_taller();
     for (int i = 0; i < num_taller; i++) {
         if (i != cursor) guardar_chunk_taller(&taller_items[i]);
@@ -182,9 +152,6 @@ static void mover_a_galeria(void) {
     taller_recargar();
 }
 
-// -------------------------------------------------------
-// API PUBLICA
-// -------------------------------------------------------
 void taller_init(void) {
     taller_recargar();
     cursor       = 0;
@@ -215,7 +182,7 @@ void taller_input(uint16_t keys) {
             render_taller();
         }
 
-    } else { // TALLER_SUBMENU
+    } else {
 
         if ((keys & KEY_UP) || (keys & KEY_DOWN)) {
             opcion_submenu = !opcion_submenu;

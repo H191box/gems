@@ -14,6 +14,8 @@
 #include "data.h"
 #include "sacos.h"
 #include "game_state.h"
+#include "mina.h"
+
 
 // --- VARIABLES GLOBALES ---
 int opcion_menu    = 0;
@@ -56,61 +58,242 @@ int main() {
     generar_chunk(&chunk_actual, semilla_actual);
     dibujar_menu(opcion_menu);
     flip();
+while (1) {
 
-    while (1) {
-        scanKeys();
-        uint16_t keys = keysDown();
+    scanKeys();
 
-        switch (estado) {
-        case ESTADO_MENU:
-            if (keys & KEY_UP)   { opcion_menu = (opcion_menu <= 0) ? 4 : opcion_menu - 1; dibujar_menu(opcion_menu); flip(); }
-            if (keys & KEY_DOWN) { opcion_menu = (opcion_menu >= 4) ? 0 : opcion_menu + 1; dibujar_menu(opcion_menu); flip(); }
-            if (keys & KEY_A) {
-                if (opcion_menu == 0)      { estado = ESTADO_FARMEO; refrescar_chunk(); }
-                else if (opcion_menu == 1) { estado = ESTADO_TALLER; taller_init(); }
-                else if (opcion_menu == 2) { estado = ESTADO_GALERIA; galeria_init(); }
-                else if (opcion_menu == 3) { estado = ESTADO_TIENDA; tienda_init(); }
-                else                       { estado = ESTADO_VIAJAR; viajar_init(); }
+    uint16_t keys = keysDown();
+
+    switch (estado) {
+
+    // -------------------------------------------------
+    // MENU
+    // -------------------------------------------------
+
+    case ESTADO_MENU:
+
+        if (keys & KEY_UP) {
+            opcion_menu = (opcion_menu <= 0) ? 4 : opcion_menu - 1;
+            dibujar_menu(opcion_menu);
+            flip();
+        }
+
+        if (keys & KEY_DOWN) {
+            opcion_menu = (opcion_menu >= 4) ? 0 : opcion_menu + 1;
+            dibujar_menu(opcion_menu);
+            flip();
+        }
+
+        if (keys & KEY_A) {
+
+            if (opcion_menu == 0) {
+
+                estado = ESTADO_MINA;
+                mina_init();
             }
-            break;
 
-        case ESTADO_FARMEO:
-            if (keys & KEY_B) { 
-                semilla_actual += 0x9E3779B9; 
-                refrescar_chunk(); 
+            else if (opcion_menu == 1) {
+
+                estado = ESTADO_TALLER;
+                taller_init();
             }
-            if (keys & KEY_A) {
-                if (chunk_actual.grietas > 0) {
-                    guardar_seed(semilla_actual);
-                    guardar_chunk_taller(&chunk_actual);
-                    flash_guardado();
+
+            else if (opcion_menu == 2) {
+
+                estado = ESTADO_GALERIA;
+                galeria_init();
+            }
+
+            else if (opcion_menu == 3) {
+
+                estado = ESTADO_TIENDA;
+                tienda_init();
+            }
+
+            else {
+
+                estado = ESTADO_VIAJAR;
+                viajar_init();
+            }
+        }
+
+        break;
+
+    // -------------------------------------------------
+    // MINA
+    // -------------------------------------------------
+
+    case ESTADO_MINA:
+
+        if (keys & KEY_START) {
+
+            estado = ESTADO_MENU;
+
+            dibujar_menu(opcion_menu);
+
+            flip();
+        }
+        else {
+
+            mina_input(keys);
+        }
+
+        break;
+
+// -------------------------------------------------
+    // FARMEO
+    // -------------------------------------------------
+
+    case ESTADO_FARMEO:
+
+        // 1. Bloqueo de seguridad inicial
+        if (mina_obtener_tiradas() <= 0) {
+            estado = ESTADO_MENU;
+            dibujar_menu(opcion_menu);
+            flip();
+            break; 
+        }
+
+        // 2. Refrescar roca: AHORA GASTA TIRADA
+        if (keys & KEY_B) {
+            semilla_actual += 0x9E3779B9;
+            mina_gastar_tirada(); // <--- GASTA TIRADA AQUÍ TAMBIÉN
+
+            // Comprobamos si al refrescar nos quedamos sin tiradas
+            if (mina_obtener_tiradas() <= 0) {
+                // Mensaje de agotado al refrescar
+                uint16_t* vram = get_vram();
+                clear(vram, 0);
+                draw_text(vram, 82, 70, "AGOTADO", 255);
+                flip();
+                for (volatile int i = 0; i < 300000; i++);
+                
+                estado = ESTADO_MENU;
+                dibujar_menu(opcion_menu);
+                flip();
+            } else {
+                refrescar_chunk();
+            }
+        }
+
+        // 3. Picar piedra (Minar): Gasta tirada
+        if (keys & KEY_A) {
+            if (chunk_actual.grietas > 0) {
+                guardar_seed(semilla_actual);
+                guardar_chunk_taller(&chunk_actual);
+                flash_guardado();
+                
+                mina_gastar_tirada(); // Gasta tirada al picar
+
+                if (mina_obtener_tiradas() <= 0) {
+                    uint16_t* vram = get_vram();
+                    clear(vram, 0);
+                    draw_text(vram, 82, 70, "AGOTADO", 255);
+                    flip();
+                    for (volatile int i = 0; i < 300000; i++);
+
+                    estado = ESTADO_MENU;
+                    dibujar_menu(opcion_menu);
+                    flip();
+                } else {
                     semilla_actual += 0x9E3779B9;
                     refrescar_chunk();
                 }
             }
-            if (keys & KEY_START) { estado = ESTADO_MENU; dibujar_menu(opcion_menu); flip(); }
-            break;
-
-        case ESTADO_TALLER:
-            if (keys & KEY_START) { estado = ESTADO_MENU; dibujar_menu(opcion_menu); flip(); }
-            else { taller_input(keys); }
-            break;
-
-        case ESTADO_TIENDA:
-            if (keys & KEY_START) { estado = ESTADO_MENU; dibujar_menu(opcion_menu); flip(); }
-            else { tienda_input(keys); }
-            break;
-
-        case ESTADO_GALERIA:
-            if (keys & KEY_START) { estado = ESTADO_MENU; dibujar_menu(opcion_menu); flip(); }
-            else { galeria_input(keys); }
-            break;
-            
-        case ESTADO_VIAJAR:
-            if (keys & KEY_START) { estado = ESTADO_MENU; dibujar_menu(opcion_menu); flip(); }
-            else { viajar_input(keys); }
-            break;
         }
+
+        if (keys & KEY_START) {
+            estado = ESTADO_MENU;
+            dibujar_menu(opcion_menu);
+            flip();
+        }
+
+        break;
+    // -------------------------------------------------
+    // TALLER
+    // -------------------------------------------------
+
+    case ESTADO_TALLER:
+
+        if (keys & KEY_START) {
+
+            estado = ESTADO_MENU;
+
+            dibujar_menu(opcion_menu);
+
+            flip();
+        }
+        else {
+
+            taller_input(keys);
+        }
+
+        break;
+
+    // -------------------------------------------------
+    // TIENDA
+    // -------------------------------------------------
+
+    case ESTADO_TIENDA:
+
+        if (keys & KEY_START) {
+
+            estado = ESTADO_MENU;
+
+            dibujar_menu(opcion_menu);
+
+            flip();
+        }
+        else {
+
+            tienda_input(keys);
+        }
+
+        break;
+
+    // -------------------------------------------------
+    // GALERIA
+    // -------------------------------------------------
+
+    case ESTADO_GALERIA:
+
+        if (keys & KEY_START) {
+
+            estado = ESTADO_MENU;
+
+            dibujar_menu(opcion_menu);
+
+            flip();
+        }
+        else {
+
+            galeria_input(keys);
+        }
+
+        break;
+
+    // -------------------------------------------------
+    // VIAJAR
+    // -------------------------------------------------
+
+    case ESTADO_VIAJAR:
+
+        if (keys & KEY_START) {
+
+            estado = ESTADO_MENU;
+
+            dibujar_menu(opcion_menu);
+
+            flip();
+        }
+        else {
+
+            viajar_input(keys);
+        }
+
+        break;
     }
-    return 0;
+}
+
+return 0;
 }

@@ -11,20 +11,12 @@
 #include "thumb_cache.h"
 #include "ciudades.h"
 
-
-// -------------------------------------------------------
-// CONFIG LAYOUT
-// Pantalla 240x160
-// Izquierda: 0-114   (lista)
-// Divisor:   115
-// Derecha:   117-239 (descripcion + miniatura)
-// -------------------------------------------------------
 #define LIST_W      115
 #define LIST_ITEM_H  14
 #define LIST_ITEMS    8
 #define SCROLL_MAX   (MAX_GALERIA - LIST_ITEMS)
 
-#define THUMB_X     146   // par, primer valor válido tras el divisor
+#define THUMB_X     146
 #define THUMB_Y      18
 
 static const char* NOMBRE_TIPO[4] = {
@@ -45,14 +37,11 @@ static const char* NOMBRE_TAM[5] = {
     "S", "M", "L", "XL", "XXL"
 };
 
-// -------------------------------------------------------
-// STATE
-// -------------------------------------------------------
 typedef enum {
     VISTA_LISTA,
     VISTA_SUBMENU,
-    VISTA_FICHA, // Nueva vista
-    VISTA_IMAGEN // Opcional: si quieres mantener la vista a pantalla completa
+    VISTA_FICHA,
+    VISTA_IMAGEN
 } VistaGaleria;
 
 static VistaGaleria vista;
@@ -60,11 +49,8 @@ static Chunk        items[MAX_GALERIA];
 static int          num_items;
 static int          cursor;
 static int          scroll;
-static int          opcion_submenu; // 0 = VER, 1 = VENDER
+static int          opcion_submenu;
 
-// -------------------------------------------------------
-// PALETA UI
-// -------------------------------------------------------
 static void init_paleta_ui(void) {
     volatile uint16_t* pal = (volatile uint16_t*)0x05000000;
     pal[0]  = 0x0000;
@@ -77,9 +63,6 @@ static void init_paleta_ui(void) {
     pal[255] = 0x7FFF;
 }
 
-// -------------------------------------------------------
-// HELPERS
-// -------------------------------------------------------
 static void clear_vram(uint16_t* vram) {
     for (int i = 0; i < 19200; i++) vram[i] = 0;
 }
@@ -92,7 +75,7 @@ static void u8_to_dec(uint8_t v, char* buf) {
 static uint32_t calcular_valor_opalo_wrapper(int idx) {
     Opalo o;
     generar_opalo(&o, items[idx].seed);
-    return calcular_valor_opalo(&o); // Llama a la función de opalo.c
+    return calcular_valor_opalo(&o);
 }
 
 static uint32_t calcular_valor_chunk_bruto(int idx) {
@@ -126,29 +109,24 @@ static void vender_item_seleccionado(int idx_lista) {
     sobreescribir_chunk(n - 1, &vacio);
     decrementar_num_chunks();
 }
-// -------------------------------------------------------
-// RENDER MINIATURA según tipo de item
-// -------------------------------------------------------
+
+/* ---- render_thumb: ahora pasa tamanyo a renderizar_opalo_pequeno ---- */
 static void render_thumb(int idx) {
     if (items[idx].cortado) {
-        // Ópalo cortado: paleta de plasma
         Opalo o;
         generar_opalo(&o, items[idx].seed);
         generar_paleta(&o);
-        renderizar_opalo_pequeno(THUMB_X, THUMB_Y, &o);
+        renderizar_opalo_pequeno(THUMB_X, THUMB_Y, &o, items[idx].tamanyo);
     } else {
-        // Chunk bruto: miniatura de roca
         renderizar_roca_pequena(THUMB_X, THUMB_Y, &items[idx]);
     }
-    init_paleta_ui();  // restaurar siempre después
+    init_paleta_ui();
 }
 
-
-extern const Ciudad ciudades[3]; // Declaración para acceder al nombre de ciudad
+extern const Ciudad ciudades[3];
 
 static void render_ficha(int idx) {
     uint16_t* vram = get_vram();
-    // Limpiamos la mitad izquierda (0-114)
     for (int y = 0; y < 160; y++) {
         for (int x = 0; x < LIST_W; x += 2) {
             vram[(y * 120) + (x / 2)] = 0;
@@ -157,33 +135,25 @@ static void render_ficha(int idx) {
 
     int y = 20;
     draw_text(vram, 5, y, "FICHA TECNICA", 255); y += 20;
-    
+
     char buf[40];
     sprintf(buf, "FECHA: %d/%d", items[idx].dia, items[idx].mes);
     draw_text(vram, 5, y, buf, 255); y += 14;
-    
+
     draw_text(vram, 5, y, "ORIGEN:", 255); y += 12;
     draw_text(vram, 5, y, (char*)ciudades[items[idx].ciudad_id].nombre, 255); y += 14;
 
     sprintf(buf, "PESO: %d K", items[idx].quilates);
     draw_text(vram, 5, y, buf, 255);
-    
+
     draw_text(vram, 5, 140, "B: VOLVER", 255);
 }
 
-
-
-
-
-// -------------------------------------------------------
-// RENDER LISTA
-// -------------------------------------------------------
 static void render_lista(void) {
     init_paleta_ui();
     uint16_t* vram = get_vram();
     clear_vram(vram);
 
-    // Cabecera
     fill_rect(vram, 0, 0, 240, 12, 4);
     draw_text(vram, 4, 2, "GALERIA", 255);
 
@@ -201,7 +171,6 @@ static void render_lista(void) {
         return;
     }
 
-    // Lista
     for (int i = 0; i < LIST_ITEMS; i++) {
         int idx = scroll + i;
         if (idx >= num_items) break;
@@ -218,7 +187,6 @@ static void render_lista(void) {
         if (items[idx].cortado) {
             Opalo o;
             generar_opalo(&o, items[idx].seed);
-            // Validamos el índice para seguridad
             int t = (o.tipo >= 0 && o.tipo < 4) ? o.tipo : 0;
             draw_text(vram, 20, y + 3, NOMBRE_TIPO[t], 255);
         } else {
@@ -226,19 +194,17 @@ static void render_lista(void) {
         }
     }
 
-    // Indicadores scroll
     if (scroll > 0)
         draw_text(vram, LIST_W / 2 - 4, 13,  "^", 255);
     if (scroll + LIST_ITEMS < num_items)
         draw_text(vram, LIST_W / 2 - 4, 150, "v", 255);
 
-    // Panel derecho
     if (cursor < num_items) {
         render_thumb(cursor);
 
         int x = LIST_W + 4;
         int y = 105;
-        char val_buf[20]; // Buffer para texto de valor
+        char val_buf[20];
 
         if (items[cursor].cortado) {
             Opalo o;
@@ -267,7 +233,6 @@ static void render_lista(void) {
         draw_text(vram, x, y, "A:OPCIONES", 255);
     }
 
-    // Submenú emergente
     if (vista == VISTA_SUBMENU) {
         int sm_x = LIST_W + 10;
         int sm_y = 100;
@@ -292,9 +257,6 @@ static void render_lista(void) {
     flip();
 }
 
-// -------------------------------------------------------
-// RENDER IMAGEN COMPLETA (solo para ópalos cortados)
-// -------------------------------------------------------
 static void render_imagen(int idx) {
     Opalo o;
     generar_opalo(&o, items[idx].seed);
@@ -310,14 +272,10 @@ static void render_imagen(int idx) {
     flip();
 }
 
-// -------------------------------------------------------
-// API PUBLICA
-// -------------------------------------------------------
 void galeria_init(void) {
     Chunk todos[MAX_GALERIA];
     int n = cargar_chunks(todos);
     num_items = 0;
-    // Mostramos tanto cortados como chunks brutos movidos desde el taller
     for (int i = 0; i < n; i++) {
         items[num_items++] = todos[i];
     }
@@ -328,6 +286,7 @@ void galeria_init(void) {
     opcion_submenu = 0;
     render_lista();
 }
+
 void galeria_input(uint16_t keys) {
 
     if (vista == VISTA_LISTA) {
@@ -361,20 +320,18 @@ void galeria_input(uint16_t keys) {
         }
         if (keys & KEY_A) {
             if (opcion_submenu == 0) {
-                // CAMBIO: Ahora esto abre la FICHA técnica
                 vista = VISTA_FICHA;
-                render_lista(); // Redibujar para limpiar y mostrar ficha
+                render_lista();
                 render_ficha(cursor);
                 flip();
             } else {
-                // VENDER — funciona para ambos tipos
                 vender_item_seleccionado(cursor);
                 galeria_init();
             }
         }
 
     } else if (vista == VISTA_FICHA) {
-        // Nueva lógica para volver desde la ficha
+
         if (keys & KEY_B) {
             vista = VISTA_LISTA;
             render_lista();
@@ -386,10 +343,8 @@ void galeria_input(uint16_t keys) {
             vista = VISTA_LISTA;
             render_lista();
         }
-        // Navegar solo entre ópalos cortados en vista imagen
         if ((keys & KEY_LEFT) && cursor > 0) {
             int prev = cursor - 1;
-            // Buscar el anterior que sea cortado
             while (prev >= 0 && !items[prev].cortado) prev--;
             if (prev >= 0) {
                 cursor = prev;
@@ -399,7 +354,6 @@ void galeria_input(uint16_t keys) {
         }
         if ((keys & KEY_RIGHT) && cursor + 1 < num_items) {
             int next = cursor + 1;
-            // Buscar el siguiente que sea cortado
             while (next < num_items && !items[next].cortado) next++;
             if (next < num_items) {
                 cursor = next;

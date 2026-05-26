@@ -3,7 +3,8 @@
 
 typedef enum { 
     ESTADO_MENU, 
-    ESTADO_FARMEO, 
+    ESTADO_FARMEO,
+    ESTADO_MINA,      
     ESTADO_TALLER, 
     ESTADO_GALERIA, 
     ESTADO_SELECTOR, 
