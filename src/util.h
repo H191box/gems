@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-// Borra la línea: void clear(uint16_t* vram, uint16_t color);
+
 
 // Mantén solo las que NO están en video.h
 void vline(uint16_t* vram, int x, int y, int h, uint8_t c);

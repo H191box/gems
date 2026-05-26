@@ -13,8 +13,6 @@
 #define LIST_W 115
 
 // Declaraciones externas
-extern const Ciudad ciudades[3];
-extern int ciudad_actual; 
 extern int opcion_menu;
 extern EstadoJuego estado;
 
@@ -34,7 +32,7 @@ void render_viaje(int cursor) {
     rect(vram, LIST_W, 12, 2, 148, 3);
 
     for (int i = 0; i < 3; i++) {
-        if (i == ciudad_actual) continue; // saltar ciudad actual
+        if (i == ciudad_actual_idx) continue; // saltar ciudad actual
         uint8_t bg = (i == cursor) ? 2 : 1;
         rect(vram, 5, 20 + (i * 40), LIST_W - 10, 30, bg);
         draw_text(vram, 10, 27 + (i * 40), (char*)ciudades[i].nombre, 255);
@@ -57,7 +55,7 @@ void render_viaje(int cursor) {
 }
 
 void viajar_init(void) {
-    cursor = (ciudad_actual == 0) ? 1 : 0;
+    cursor = (ciudad_actual_idx == 0) ? 1 : 0;
     vista = VISTA_LISTA;
     render_viaje(cursor);
 }
@@ -65,20 +63,22 @@ void viajar_init(void) {
 int viajar_input(uint16_t keys) {
     if (vista == VISTA_LISTA) {
         if (keys & KEY_UP) {
-            do { cursor--; } while (cursor >= 0 && cursor == ciudad_actual);
-            if (cursor < 0) cursor = ciudad_actual == 0 ? 1 : 0;
+            do { cursor--; if (cursor < 0) cursor = 2; } while (cursor == ciudad_actual_idx);
         }
         if (keys & KEY_DOWN) {
-            do { cursor++; } while (cursor < 3 && cursor == ciudad_actual);
-            if (cursor >= 3) cursor = ciudad_actual == 2 ? 1 : 2;
+            do { cursor++; if (cursor > 2) cursor = 0; } while (cursor == ciudad_actual_idx);
         }
         if (keys & KEY_A) vista = VISTA_CONFIRMAR;
         render_viaje(cursor);
     } else {
         if (keys & KEY_A) {
             if (obtener_dinero() >= ciudades[cursor].tasa_venta) {
+                // --- INTEGRACIÓN: Tiempo y Viaje ---
                 modificar_dinero(-(int32_t)ciudades[cursor].tasa_venta);
-                ciudad_actual = cursor;
+                ciudad_actual_idx = cursor; // Actualizamos la ciudad global
+                avanzar_tiempo();           // El tiempo avanza al viajar
+                
+                sync_save_world_state();
                 
                 fundido_a_negro();
                 REG_BLDCNT = 0;

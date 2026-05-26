@@ -1,5 +1,5 @@
 #include <stdint.h>
-#include <stdio.h> // Para sprintf
+#include <stdio.h>
 #include <gba_video.h>
 #include <gba_input.h>
 #include "galeria.h"
@@ -9,20 +9,24 @@
 #include "font.h"
 #include "opalo.h"
 #include "thumb_cache.h"
+#include "ciudades.h"
+
 
 // -------------------------------------------------------
 // CONFIG LAYOUT
 // Pantalla 240x160
 // Izquierda: 0-114   (lista)
-// Divisor:   115-116
-// Derecha:   117-239 (descripcion)
+// Divisor:   115
+// Derecha:   117-239 (descripcion + miniatura)
 // -------------------------------------------------------
-#define LIST_W       115
+#define LIST_W      115
 #define LIST_ITEM_H  14
-#define LIST_ITEMS    8   // filas visibles
+#define LIST_ITEMS    8
 #define SCROLL_MAX   (MAX_GALERIA - LIST_ITEMS)
 
-// Nombres de tipo
+#define THUMB_X     146   // par, primer valor válido tras el divisor
+#define THUMB_Y      18
+
 static const char* NOMBRE_TIPO[4] = {
     "OPALO NEGRO",
     "OPALO CRISTAL",
@@ -30,7 +34,6 @@ static const char* NOMBRE_TIPO[4] = {
     "OPALO BLANCO"
 };
 
-// Nombres de patrón
 static const char* NOMBRE_PATRON[4] = {
     "NEBULA",
     "VENAS",
@@ -38,7 +41,6 @@ static const char* NOMBRE_PATRON[4] = {
     "CHAOS"
 };
 
-// Nombres de tamaño
 static const char* NOMBRE_TAM[5] = {
     "S", "M", "L", "XL", "XXL"
 };
@@ -48,15 +50,16 @@ static const char* NOMBRE_TAM[5] = {
 // -------------------------------------------------------
 typedef enum {
     VISTA_LISTA,
-    VISTA_SUBMENU, // NUEVO ESTADO para elegir Ver o Vender
-    VISTA_IMAGEN
+    VISTA_SUBMENU,
+    VISTA_FICHA, // Nueva vista
+    VISTA_IMAGEN // Opcional: si quieres mantener la vista a pantalla completa
 } VistaGaleria;
 
 static VistaGaleria vista;
 static Chunk        items[MAX_GALERIA];
 static int          num_items;
 static int          cursor;
-static int          scroll;    // primera fila visible
+static int          scroll;
 static int          opcion_submenu; // 0 = VER, 1 = VENDER
 
 // -------------------------------------------------------
@@ -64,107 +67,113 @@ static int          opcion_submenu; // 0 = VER, 1 = VENDER
 // -------------------------------------------------------
 static void init_paleta_ui(void) {
     volatile uint16_t* pal = (volatile uint16_t*)0x05000000;
-    pal[0]  = 0x0000;                               // negro fondo
-    pal[1]  = 0x294A;                               // gris oscuro fila normal
-    pal[2]  = 0x681F;                               // morado fila seleccionada
-    pal[3]  = 0x4210;                               // gris divisor
-    pal[4]  = 0x6810;                               // azul cabecera
-    pal[5]  = 0x1F00;                               // NUEVO: Azul oscuro para el fondo del submenú
-    pal[255]= 0x7FFF;                               // blanco texto
+    pal[0]  = 0x0000;
+    pal[1]  = 0x294A;
+    pal[2]  = 0x681F;
+    pal[3]  = 0x4210;
+    pal[4]  = 0x6810;
+    pal[5]  = 0x1F00;
+    for (int i = 6; i <= 15; i++) pal[i] = 0x0000;
+    pal[255] = 0x7FFF;
 }
 
 // -------------------------------------------------------
-// HELPERS DE DIBUJO
+// HELPERS
 // -------------------------------------------------------
 static void clear_vram(uint16_t* vram) {
     for (int i = 0; i < 19200; i++) vram[i] = 0;
 }
-
-static void put_pixel(uint16_t* vram, int x, int y, uint8_t c) {
-    if (x < 0 || x >= 240 || y < 0 || y >= 160) return;
-    int idx = y * 120 + x / 2;
-    if (x & 1) vram[idx] = (vram[idx] & 0x00FF) | ((uint16_t)c << 8);
-    else        vram[idx] = (vram[idx] & 0xFF00) | c;
-}
-
 
 static void u8_to_dec(uint8_t v, char* buf) {
     buf[0] = '0' + (v / 10);
     buf[1] = '0' + (v % 10);
 }
 
-// NUEVA FUNCIÓN AUXILIAR: Calcula el precio dinámico del ópalo para mostrarlo y venderlo
-static uint16_t calcular_valor_opalo(int idx) {
+static uint32_t calcular_valor_opalo_wrapper(int idx) {
     Opalo o;
     generar_opalo(&o, items[idx].seed);
-
-    // Precio base por karat según tipo (de menos a más valioso)
-    uint16_t precio_karat;
-    switch (o.tipo) {
-        case 0: precio_karat = 8;  break; // OPALO NEGRO   - el más valioso de base
-        case 2: precio_karat = 6;  break; // OPALO FUEGO
-        case 1: precio_karat = 4;  break; // OPALO CRISTAL
-        default:precio_karat = 2;  break; // OPALO BLANCO  - el más común
-    }
-
-    // Modificador de brillo: brillo va de 16 a 31
-    // brillo 16 → ×0.8,  brillo 31 → ×1.5 aprox
-    // Usamos factor entero: (brillo * 10) / 20 → rango 8-15, /10 al final
-    uint16_t mod_brillo = (uint16_t)o.brillo * 10 / 20; // 8-15
-
-    // Modificador de saturación: igual de rango
-    uint16_t mod_sat = (uint16_t)o.saturacion * 10 / 20; // 8-15
-
-    // Bonus por patrón (algunos patrones son más raros y cotizados)
-    uint16_t bonus_patron;
-    switch (o.patron) {
-        case 3: bonus_patron = 4; break; // CHAOS   - muy raro
-        case 1: bonus_patron = 3; break; // VENAS
-        case 2: bonus_patron = 2; break; // MOSAICO
-        default:bonus_patron = 1; break; // NEBULA  - común
-    }
-
-    // precio_karat final = base * mod_brillo * mod_sat / 100 + bonus_patron
-    precio_karat = (uint16_t)(precio_karat * mod_brillo * mod_sat / 100) + bonus_patron;
-    if (precio_karat < 1) precio_karat = 1;
-
-    // Karats = tamanyo × peso (ambos 1-10 aprox, tamanyo 1-5)
-    uint16_t karats = (uint16_t)items[idx].tamanyo * items[idx].peso;
-
-    return precio_karat * karats;
+    return calcular_valor_opalo(&o); // Llama a la función de opalo.c
 }
-// NUEVA FUNCIÓN AUXILIAR: Ejecuta la venta en la RAM virtual y reorganiza los slots
-static void vender_opalo_seleccionado(int idx_lista) {
+
+static uint32_t calcular_valor_chunk_bruto(int idx) {
+    return (uint32_t)(items[idx].tamanyo * items[idx].quilates * 2)
+         + (items[idx].grietas * 5);
+}
+
+static void vender_item_seleccionado(int idx_lista) {
     Chunk todos[MAX_GALERIA];
     int n = cargar_chunks(todos);
 
-    // Buscamos cuál es el índice real en save.c comparando la semilla
     int slot_sram = -1;
     for (int i = 0; i < n; i++) {
-        if (todos[i].seed == items[idx_lista].seed && todos[i].cortado) {
+        if (todos[i].seed == items[idx_lista].seed) {
             slot_sram = i;
             break;
         }
     }
-
     if (slot_sram == -1) return;
 
-    // 1. Añadimos el dinero en base a su valor
-    uint16_t valor = calcular_valor_opalo(idx_lista);
+    uint32_t valor = items[idx_lista].cortado
+                   ? calcular_valor_opalo_wrapper(idx_lista)
+                   : calcular_valor_chunk_bruto(idx_lista);
+
     modificar_dinero((int32_t)valor);
 
-    // 2. Desplazamos todos los chunks hacia atrás en save.c para mantener la estructura secuencial libre de huecos
     for (int i = slot_sram; i < n - 1; i++) {
         sobreescribir_chunk(i, &todos[i + 1]);
     }
-
-    // 3. Limpiamos el último hueco libre que ha quedado duplicado
     Chunk vacio = {0};
     sobreescribir_chunk(n - 1, &vacio);
-
-    // 4. Bajamos el contador general de chunks usando la función que preparamos para save.c
     decrementar_num_chunks();
 }
+// -------------------------------------------------------
+// RENDER MINIATURA según tipo de item
+// -------------------------------------------------------
+static void render_thumb(int idx) {
+    if (items[idx].cortado) {
+        // Ópalo cortado: paleta de plasma
+        Opalo o;
+        generar_opalo(&o, items[idx].seed);
+        generar_paleta(&o);
+        renderizar_opalo_pequeno(THUMB_X, THUMB_Y, &o);
+    } else {
+        // Chunk bruto: miniatura de roca
+        renderizar_roca_pequena(THUMB_X, THUMB_Y, &items[idx]);
+    }
+    init_paleta_ui();  // restaurar siempre después
+}
+
+
+extern const Ciudad ciudades[3]; // Declaración para acceder al nombre de ciudad
+
+static void render_ficha(int idx) {
+    uint16_t* vram = get_vram();
+    // Limpiamos la mitad izquierda (0-114)
+    for (int y = 0; y < 160; y++) {
+        for (int x = 0; x < LIST_W; x += 2) {
+            vram[(y * 120) + (x / 2)] = 0;
+        }
+    }
+
+    int y = 20;
+    draw_text(vram, 5, y, "FICHA TECNICA", 255); y += 20;
+    
+    char buf[40];
+    sprintf(buf, "FECHA: %d/%d", items[idx].dia, items[idx].mes);
+    draw_text(vram, 5, y, buf, 255); y += 14;
+    
+    draw_text(vram, 5, y, "ORIGEN:", 255); y += 12;
+    draw_text(vram, 5, y, (char*)ciudades[items[idx].ciudad_id].nombre, 255); y += 14;
+
+    sprintf(buf, "PESO: %d K", items[idx].quilates);
+    draw_text(vram, 5, y, buf, 255);
+    
+    draw_text(vram, 5, 140, "B: VOLVER", 255);
+}
+
+
+
+
 
 // -------------------------------------------------------
 // RENDER LISTA
@@ -176,120 +185,115 @@ static void render_lista(void) {
 
     // Cabecera
     fill_rect(vram, 0, 0, 240, 12, 4);
-    draw_text(vram, 4,   2, "GALERIA",    255);
-    
-    // NUEVO: Imprimir el dinero actual en la cabecera (alineado a la derecha)
+    draw_text(vram, 4, 2, "GALERIA", 255);
+
     char txt_dinero[16];
     sprintf(txt_dinero, "ORO: %d", obtener_dinero());
     draw_text(vram, 175, 2, txt_dinero, 255);
 
-    // Divisor vertical
     vline(vram, LIST_W, 12, 148, 3);
 
     if (num_items == 0) {
-        draw_text(vram, 10, 70, "GALERIA VACIA", 255);
-        draw_text(vram, 10, 85, "CORTA CHUNKS", 255);
-        draw_text(vram, 10, 100,"EN EL TALLER",  255);
+        draw_text(vram, 10,  70, "GALERIA VACIA", 255);
+        draw_text(vram, 10,  85, "CORTA O MUEVE", 255);
+        draw_text(vram, 10, 100, "EN EL TALLER",  255);
         flip();
         return;
     }
 
-    // Lista: filas visibles según scroll
+    // Lista
     for (int i = 0; i < LIST_ITEMS; i++) {
         int idx = scroll + i;
         if (idx >= num_items) break;
 
-        int y   = 13 + i * LIST_ITEM_H;
+        int y      = 13 + i * LIST_ITEM_H;
         uint8_t bg = (idx == cursor) ? 2 : 1;
         fill_rect(vram, 0, y, LIST_W - 1, LIST_ITEM_H - 1, bg);
 
-        // Número + nombre tipo
         char num[4] = "XX.";
-        u8_to_dec((uint8_t)(idx + 1), num);
+        num[0] = '0' + ((idx + 1) / 10);
+        num[1] = '0' + ((idx + 1) % 10);
         draw_text(vram, 2, y + 3, num, 255);
 
-        Opalo o;
-        generar_opalo(&o, items[idx].seed);
-        draw_text(vram, 20, y + 3, NOMBRE_TIPO[o.tipo], 255);
+        if (items[idx].cortado) {
+            Opalo o;
+            generar_opalo(&o, items[idx].seed);
+            // Validamos el índice para seguridad
+            int t = (o.tipo >= 0 && o.tipo < 4) ? o.tipo : 0;
+            draw_text(vram, 20, y + 3, NOMBRE_TIPO[t], 255);
+        } else {
+            draw_text(vram, 20, y + 3, "CHUNK BRUTO", 255);
+        }
     }
 
-    // Indicadores de scroll
+    // Indicadores scroll
     if (scroll > 0)
-        draw_text(vram, LIST_W / 2 - 4, 13,      "^", 255);
+        draw_text(vram, LIST_W / 2 - 4, 13,  "^", 255);
     if (scroll + LIST_ITEMS < num_items)
-        draw_text(vram, LIST_W / 2 - 4, 150,     "v", 255);
+        draw_text(vram, LIST_W / 2 - 4, 150, "v", 255);
 
-    // Panel derecho: descripción del item seleccionado
+    // Panel derecho
     if (cursor < num_items) {
-        Opalo o;
-        generar_opalo(&o, items[cursor].seed);
+        render_thumb(cursor);
 
         int x = LIST_W + 4;
-        int y = 14;
+        int y = 105;
+        char val_buf[20]; // Buffer para texto de valor
 
-        draw_text(vram, x, y,      NOMBRE_TIPO[o.tipo],       255); y += 12;
-        draw_text(vram, x, y,      NOMBRE_PATRON[o.patron],   255); y += 14;
+        if (items[cursor].cortado) {
+            Opalo o;
+            generar_opalo(&o, items[cursor].seed);
+            int t = (o.tipo >= 0 && o.tipo < 4) ? o.tipo : 0;
 
-        // Tamaño
-        char tam[8] = "TAM: X";
-        tam[5] = NOMBRE_TAM[items[cursor].tamanyo - 1][0];
-        draw_text(vram, x, y, tam, 255); y += 11;
+            draw_text(vram, x, y, NOMBRE_TIPO[t], 255); y += 12;
+            draw_text(vram, x, y, NOMBRE_PATRON[o.patron], 255); y += 14;
 
-        // Peso
-        char peso[10] = "PESO: XX";
-        u8_to_dec(items[cursor].peso, &peso[6]);
-        draw_text(vram, x, y, peso, 255); y += 11;
+            uint32_t valor = calcular_valor_opalo_wrapper(cursor);
+            sprintf(val_buf, "VALOR: %d", valor);
+            draw_text(vram, x, y, val_buf, 255); y += 14;
 
-        // Brillo
-        char bri[12] = "BRILL: XX";
-        u8_to_dec(o.brillo, &bri[7]);
-        draw_text(vram, x, y, bri, 255); y += 11;
+        } else {
+            char buf[24];
+            draw_text(vram, x, y, "CHUNK SIN CORTAR", 255); y += 14;
 
-        // Saturación
-        char sat[12] = "SAT:   XX";
-        u8_to_dec(o.saturacion, &sat[7]);
-        draw_text(vram, x, y, sat, 255); y += 14;
+            sprintf(buf, "PESO:   %d", items[cursor].quilates);
+            draw_text(vram, x, y, buf, 255); y += 12;
 
-        // Valor estimado
-        uint16_t valor = calcular_valor_opalo(cursor);
-        char val[14] = "VALOR: XXXX";
-        val[7]  = '0' + (valor / 1000) % 10;
-        val[8]  = '0' + (valor / 100) % 10;
-        val[9]  = '0' + (valor /  10) % 10;
-        val[10] = '0' + (valor       ) % 10;
-        draw_text(vram, x, y, val, 255); y += 14;
+            uint32_t valor = calcular_valor_chunk_bruto(cursor);
+            sprintf(val_buf, "VALOR: %d", valor);
+            draw_text(vram, x, y, val_buf, 255); y += 14;
+        }
 
-        draw_text(vram, x, y, "A:OPCIONES", 255); // Cambiado para indicar que abre submenú
+        draw_text(vram, x, y, "A:OPCIONES", 255);
     }
 
-    // NUEVO: Si estamos en el estado submenú, pintamos la ventana emergente encima del panel derecho
+    // Submenú emergente
     if (vista == VISTA_SUBMENU) {
         int sm_x = LIST_W + 10;
         int sm_y = 100;
         int sm_w = 105;
         int sm_h = 42;
 
-        // Dibujamos el marco de la cajita del submenú
-        fill_rect(vram, sm_x, sm_y, sm_w, sm_h, 3);       // Borde exterior gris
-        fill_rect(vram, sm_x + 2, sm_y + 2, sm_w - 4, sm_h - 4, 5); // Fondo azul oscuro
+        fill_rect(vram, sm_x, sm_y, sm_w, sm_h, 3);
+        fill_rect(vram, sm_x + 2, sm_y + 2, sm_w - 4, sm_h - 4, 5);
 
-        // Dibujamos las opciones con el indicador astronómico '>'
+        int es_opalo = (cursor < num_items) && items[cursor].cortado;
+
         if (opcion_submenu == 0) {
-            draw_text(vram, sm_x + 6, sm_y + 8,  "> VER IMAGEN", 255);
-            draw_text(vram, sm_x + 6, sm_y + 24, "  VENDER OPALO", 255);
+            draw_text(vram, sm_x + 6, sm_y + 8,  es_opalo ? "> VER IMAGEN" : "> ---", 255);
+            draw_text(vram, sm_x + 6, sm_y + 24, "  VENDER", 255);
         } else {
-            draw_text(vram, sm_x + 6, sm_y + 8,  "  VER IMAGEN", 255);
-            draw_text(vram, sm_x + 6, sm_y + 24, "> VENDER OPALO", 255);
+            draw_text(vram, sm_x + 6, sm_y + 8,  es_opalo ? "  VER IMAGEN" : "  ---", 255);
+            draw_text(vram, sm_x + 6, sm_y + 24, "> VENDER", 255);
         }
     }
 
-    // Instrucciones pie
     draw_text(vram, 0, 152, "ARR/ABA:MOVER  START:MENU", 255);
     flip();
 }
 
 // -------------------------------------------------------
-// RENDER IMAGEN COMPLETA
+// RENDER IMAGEN COMPLETA (solo para ópalos cortados)
 // -------------------------------------------------------
 static void render_imagen(int idx) {
     Opalo o;
@@ -297,12 +301,11 @@ static void render_imagen(int idx) {
     generar_paleta(&o);
     renderizar_opalo(&o);
 
-    // Aseguramos que el blanco esté disponible para el texto
     volatile uint16_t* pal = (volatile uint16_t*)0x05000000;
     pal[255] = 0x7FFF;
 
     uint16_t* vram = get_vram();
-    draw_text(vram, 2, 2, NOMBRE_TIPO[o.tipo], 255);
+    draw_text(vram, 2, 2,   NOMBRE_TIPO[o.tipo], 255);
     draw_text(vram, 2, 150, "B:VOLVER  IZQ/DER:CAMBIAR", 255);
     flip();
 }
@@ -311,14 +314,12 @@ static void render_imagen(int idx) {
 // API PUBLICA
 // -------------------------------------------------------
 void galeria_init(void) {
-    // Solo mostramos los chunks ya cortados
     Chunk todos[MAX_GALERIA];
     int n = cargar_chunks(todos);
     num_items = 0;
+    // Mostramos tanto cortados como chunks brutos movidos desde el taller
     for (int i = 0; i < n; i++) {
-        if (todos[i].cortado) {
-            items[num_items++] = todos[i];
-        }
+        items[num_items++] = todos[i];
     }
 
     cursor = 0;
@@ -327,7 +328,6 @@ void galeria_init(void) {
     opcion_submenu = 0;
     render_lista();
 }
-
 void galeria_input(uint16_t keys) {
 
     if (vista == VISTA_LISTA) {
@@ -344,51 +344,69 @@ void galeria_input(uint16_t keys) {
             render_lista();
         }
         if ((keys & KEY_A) && num_items > 0) {
-            // NUEVO: Al pulsar A abrimos el submenú en lugar de saltar directo a la imagen
             vista = VISTA_SUBMENU;
-            opcion_submenu = 0; // Apunta a "VER" por defecto
+            opcion_submenu = 0;
             render_lista();
         }
 
-    } else if (vista == VISTA_SUBMENU) { // NUEVO BLOQUE DE CONTROL DEL SUBMENÚ
+    } else if (vista == VISTA_SUBMENU) {
 
         if ((keys & KEY_UP) || (keys & KEY_DOWN)) {
-            opcion_submenu = !opcion_submenu; // Cambia entre 0 (Ver) y 1 (Vender)
+            opcion_submenu = !opcion_submenu;
             render_lista();
         }
         if (keys & KEY_B) {
-            vista = VISTA_LISTA; // Cancela el submenú y vuelve a la lista normal
+            vista = VISTA_LISTA;
             render_lista();
         }
         if (keys & KEY_A) {
             if (opcion_submenu == 0) {
-                // Opción VER IMAGEN
-                vista = VISTA_IMAGEN;
-                render_imagen(cursor);
+                // CAMBIO: Ahora esto abre la FICHA técnica
+                vista = VISTA_FICHA;
+                render_lista(); // Redibujar para limpiar y mostrar ficha
+                render_ficha(cursor);
+                flip();
             } else {
-                // Opción VENDER ÓPALO
-                vender_opalo_seleccionado(cursor);
-                // Tras venderlo, refrescamos la galería completa para actualizar la lista
-                galeria_init(); 
+                // VENDER — funciona para ambos tipos
+                vender_item_seleccionado(cursor);
+                galeria_init();
             }
         }
 
-    } else {  // VISTA_IMAGEN
+    } else if (vista == VISTA_FICHA) {
+        // Nueva lógica para volver desde la ficha
+        if (keys & KEY_B) {
+            vista = VISTA_LISTA;
+            render_lista();
+        }
+
+    } else { // VISTA_IMAGEN
 
         if (keys & KEY_B) {
             vista = VISTA_LISTA;
             render_lista();
         }
+        // Navegar solo entre ópalos cortados en vista imagen
         if ((keys & KEY_LEFT) && cursor > 0) {
-            cursor--;
-            if (cursor < scroll) scroll = cursor;
-            render_imagen(cursor);
+            int prev = cursor - 1;
+            // Buscar el anterior que sea cortado
+            while (prev >= 0 && !items[prev].cortado) prev--;
+            if (prev >= 0) {
+                cursor = prev;
+                if (cursor < scroll) scroll = cursor;
+                render_imagen(cursor);
+            }
         }
         if ((keys & KEY_RIGHT) && cursor + 1 < num_items) {
-            cursor++;
-            if (cursor >= scroll + LIST_ITEMS)
-                scroll = cursor - LIST_ITEMS + 1;
-            render_imagen(cursor);
+            int next = cursor + 1;
+            // Buscar el siguiente que sea cortado
+            while (next < num_items && !items[next].cortado) next++;
+            if (next < num_items) {
+                cursor = next;
+                if (cursor >= scroll + LIST_ITEMS)
+                    scroll = cursor - LIST_ITEMS + 1;
+                render_imagen(cursor);
+            }
         }
     }
 }

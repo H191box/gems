@@ -16,8 +16,7 @@
 #include "game_state.h"
 
 // --- VARIABLES GLOBALES ---
-int ciudad_actual = 0;
-int opcion_menu   = 0;
+int opcion_menu    = 0;
 EstadoJuego estado = ESTADO_MENU;
 
 // --- VARIABLES LOCALES PARA FARMEO ---
@@ -29,6 +28,13 @@ static Chunk    chunk_actual;
 // -------------------------------------------------------
 static void refrescar_chunk(void) {
     generar_chunk(&chunk_actual, semilla_actual);
+    
+    // --- INTEGRACIÓN: Etiquetar el chunk con datos de la ciudad ---
+    chunk_actual.dia = dia_actual;
+    chunk_actual.mes = mes_actual;
+    chunk_actual.ciudad_id = ciudad_actual_idx;
+    // -------------------------------------------------------------
+    
     renderizar_roca(&chunk_actual);
     flip();
 }
@@ -39,7 +45,14 @@ static void refrescar_chunk(void) {
 int main() {
     REG_DISPCNT = MODE_4 | BG2_ENABLE;
 
+    // Inicialización del sistema
     semilla_actual = cargar_seed();
+    
+    // Inicialización de tiempo (ej: día 1 mes 1)
+    dia_actual = 1;
+    mes_actual = 1;
+    ciudad_actual_idx = 0;
+
     generar_chunk(&chunk_actual, semilla_actual);
     dibujar_menu(opcion_menu);
     flip();
@@ -68,7 +81,6 @@ int main() {
             }
             if (keys & KEY_A) {
                 if (chunk_actual.grietas > 0) {
-                    // Ahora guardamos directo sin selector
                     guardar_seed(semilla_actual);
                     guardar_chunk_taller(&chunk_actual);
                     flash_guardado();

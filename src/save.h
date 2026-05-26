@@ -28,4 +28,7 @@ void     reset_taller(void);
 uint32_t obtener_dinero(void);
 void     modificar_dinero(int32_t cantidad);
 
+// Gestión de Estado Mundial (Tiempo y Ubicación)
+void     sync_save_world_state(void);
+
 #endif // SAVE_H

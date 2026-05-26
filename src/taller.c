@@ -7,18 +7,52 @@
 #include "video.h"
 #include "font.h"
 #include "opalo.h"
+#include "plasma.h"
 
 #define LIST_W      115
 #define LIST_ITEM_H 14
 #define LIST_ITEMS  8
+
+// x_pos de la miniatura: par, primer valor tras el divisor
+#define THUMB_X     146
+#define THUMB_Y      18
 
 static Chunk taller_items[MAX_TALLER];
 static int   num_taller;
 static int   cursor;
 static int   scroll;
 
-// Función para renderizar la pantalla
+// -------------------------------------------------------
+// SUBMENU
+// -------------------------------------------------------
+typedef enum {
+    TALLER_LISTA,
+    TALLER_SUBMENU
+} VistaTaller;
+
+static VistaTaller vista_taller;
+static int         opcion_submenu; // 0 = CORTAR, 1 = MOVER A GALERIA
+
+// -------------------------------------------------------
+// PALETA UI (igual que en galeria.c)
+// -------------------------------------------------------
+static void init_paleta_ui(void) {
+    volatile uint16_t* pal = (volatile uint16_t*)0x05000000;
+    pal[0]  = 0x0000;  // negro — fondo
+    pal[1]  = 0x294A;  // gris oscuro — fila normal
+    pal[2]  = 0x681F;  // morado — fila seleccionada
+    pal[3]  = 0x4210;  // gris — divisor
+    pal[4]  = 0x6810;  // azul — cabecera
+    pal[5]  = 0x1F00;  // azul oscuro — fondo submenú
+    for (int i = 6; i <= 15; i++) pal[i] = 0x0000;
+    pal[255] = 0x7FFF; // blanco texto
+}
+
+// -------------------------------------------------------
+// RENDER TALLER
+// -------------------------------------------------------
 static void render_taller(void) {
+    init_paleta_ui();
     uint16_t* vram = get_vram();
     clear(vram, 0);
 
@@ -28,17 +62,18 @@ static void render_taller(void) {
     vline(vram, LIST_W, 12, 148, 3);
 
     if (num_taller == 0) {
-        draw_text(vram, 10, 70, "TALLER VACIO", 255);
+        draw_text(vram, 10, 70, "TALLER VACIO",  255);
+        draw_text(vram, 10, 85, "FARMEA CHUNKS", 255);
         flip();
         return;
     }
 
-    // Lista de Chunks
+    // Lista de chunks
     for (int i = 0; i < LIST_ITEMS; i++) {
         int idx = scroll + i;
         if (idx >= num_taller) break;
 
-        int y = 13 + i * LIST_ITEM_H;
+        int y      = 13 + i * LIST_ITEM_H;
         uint8_t bg = (idx == cursor) ? 2 : 1;
         fill_rect(vram, 0, y, LIST_W - 1, LIST_ITEM_H - 1, bg);
 
@@ -47,66 +82,164 @@ static void render_taller(void) {
         draw_text(vram, 4, y + 3, label, 255);
     }
 
-    // Panel Derecho
+    // Indicadores de scroll
+    if (scroll > 0)
+        draw_text(vram, LIST_W / 2 - 4, 13,  "^", 255);
+    if (scroll + LIST_ITEMS < num_taller)
+        draw_text(vram, LIST_W / 2 - 4, 150, "v", 255);
+
+    // Panel derecho: miniatura + datos
     if (cursor < num_taller) {
-        int x = LIST_W + 4;
         Chunk* c = &taller_items[cursor];
-        
-        char buf[32];
-        sprintf(buf, "TAM: %d", c->tamanyo);
-        draw_text(vram, x, 20, buf, 255);
-        sprintf(buf, "GRIETAS: %d", c->grietas);
-        draw_text(vram, x, 32, buf, 255);
-        sprintf(buf, "PESO: %d", c->peso);
-        draw_text(vram, x, 44, buf, 255);
-        
-        draw_text(vram, x, 80, "A: CORTAR", 255);
+
+        // 1. Miniatura de la roca (paleta roca → render → restaurar UI)
+        renderizar_roca_pequena(THUMB_X, THUMB_Y, c);
+        init_paleta_ui();
+
+        // 2. Datos debajo de la miniatura
+        int x = LIST_W + 4;
+        int y = 105;
+
+        char buf[24];
+        sprintf(buf, "TAM:    %d", c->tamanyo);
+        draw_text(vram, x, y, buf, 255); y += 12;
+
+        sprintf(buf, "PESO:   %d", c->quilates);
+        draw_text(vram, x, y, buf, 255); y += 12;
+
+        sprintf(buf, "GRIETAS:%d", c->grietas);
+        draw_text(vram, x, y, buf, 255); y += 14;
+
+        // Pista del tipo interior si hay grieta
+        if (c->grietas > 0 && c->pista > 0) {
+            static const char* PISTA_TEXTO[5] = {
+                "", "NEGRO?", "CRISTAL?", "FUEGO?", "BLANCO?"
+            };
+            draw_text(vram, x, y, PISTA_TEXTO[c->pista], 255);
+            y += 12;
+        }
+
+        draw_text(vram, x, y, "A:OPCIONES", 255);
     }
+
+    // Submenú emergente
+    if (vista_taller == TALLER_SUBMENU) {
+        int sm_x = LIST_W + 10;
+        int sm_y = 100;
+        int sm_w = 105;
+        int sm_h = 42;
+
+        fill_rect(vram, sm_x,     sm_y,     sm_w,     sm_h,     3);
+        fill_rect(vram, sm_x + 2, sm_y + 2, sm_w - 4, sm_h - 4, 5);
+
+        if (opcion_submenu == 0) {
+            draw_text(vram, sm_x + 6, sm_y + 8,  "> CORTAR",         255);
+            draw_text(vram, sm_x + 6, sm_y + 24, "  MOVER GALERIA",  255);
+        } else {
+            draw_text(vram, sm_x + 6, sm_y + 8,  "  CORTAR",         255);
+            draw_text(vram, sm_x + 6, sm_y + 24, "> MOVER GALERIA",  255);
+        }
+    }
+
+    draw_text(vram, 0, 152, "ARR/ABA:MOVER  START:MENU", 255);
     flip();
 }
 
+// -------------------------------------------------------
+// CORTAR CHUNK (lógica original)
+// -------------------------------------------------------
+static void cortar_chunk_seleccionado(void) {
+    Chunk c = taller_items[cursor];
+    c.cortado = 1;
+    guardar_chunk(&c);
+
+    // Reconstruir taller sin el chunk cortado
+    reset_taller();
+    for (int i = 0; i < num_taller; i++) {
+        if (i != cursor) guardar_chunk_taller(&taller_items[i]);
+    }
+
+    taller_recargar();
+}
+
+// -------------------------------------------------------
+// MOVER A GALERIA sin cortar
+// El chunk pasa a galería con cortado=0 para que aparezca
+// en la lista junto a los ópalos. El precio se ajustará
+// más adelante desde galería.
+// -------------------------------------------------------
+static void mover_a_galeria(void) {
+    Chunk c = taller_items[cursor];
+    // cortado se deja en 0 — galería mostrará ambos tipos
+    guardar_chunk(&c);
+
+    // Eliminar del taller
+    reset_taller();
+    for (int i = 0; i < num_taller; i++) {
+        if (i != cursor) guardar_chunk_taller(&taller_items[i]);
+    }
+
+    taller_recargar();
+}
+
+// -------------------------------------------------------
+// API PUBLICA
+// -------------------------------------------------------
 void taller_init(void) {
     taller_recargar();
-    cursor = 0;
-    scroll = 0;
+    cursor       = 0;
+    scroll       = 0;
+    vista_taller = TALLER_LISTA;
+    opcion_submenu = 0;
     render_taller();
 }
 
 void taller_input(uint16_t keys) {
-    if ((keys & KEY_DOWN) && cursor + 1 < num_taller) {
-        cursor++;
-        if (cursor >= scroll + LIST_ITEMS) scroll = cursor - LIST_ITEMS + 1;
-        render_taller();
-    }
-    if ((keys & KEY_UP) && cursor > 0) {
-        cursor--;
-        if (cursor < scroll) scroll = cursor;
-        render_taller();
-    }
 
-    // Lógica al pulsar A (Corte)
-    if ((keys & KEY_A) && num_taller > 0) {
-        // 1. Procesar el corte
-        Chunk c = taller_items[cursor];
-        c.cortado = 1;
-        guardar_chunk(&c); // Guarda en la galería
+    if (vista_taller == TALLER_LISTA) {
 
-        // 2. Reorganizar taller (eliminar el cortado)
-        reset_taller();
-        for(int i = 0; i < num_taller; i++) {
-            if(i != cursor) guardar_chunk_taller(&taller_items[i]);
+        if ((keys & KEY_DOWN) && cursor + 1 < num_taller) {
+            cursor++;
+            if (cursor >= scroll + LIST_ITEMS)
+                scroll = cursor - LIST_ITEMS + 1;
+            render_taller();
+        }
+        if ((keys & KEY_UP) && cursor > 0) {
+            cursor--;
+            if (cursor < scroll) scroll = cursor;
+            render_taller();
+        }
+        if ((keys & KEY_A) && num_taller > 0) {
+            vista_taller   = TALLER_SUBMENU;
+            opcion_submenu = 0;
+            render_taller();
         }
 
-        // 3. Recargar estado y refrescar
-        taller_recargar();
-        render_taller();
+    } else { // TALLER_SUBMENU
+
+        if ((keys & KEY_UP) || (keys & KEY_DOWN)) {
+            opcion_submenu = !opcion_submenu;
+            render_taller();
+        }
+        if (keys & KEY_B) {
+            vista_taller = TALLER_LISTA;
+            render_taller();
+        }
+        if (keys & KEY_A) {
+            if (opcion_submenu == 0) {
+                cortar_chunk_seleccionado();
+            } else {
+                mover_a_galeria();
+            }
+            vista_taller = TALLER_LISTA;
+            render_taller();
+        }
     }
 }
 
 void taller_recargar(void) {
     num_taller = cargar_chunks_taller(taller_items);
-    if (cursor >= num_taller) {
+    if (cursor >= num_taller)
         cursor = (num_taller > 0) ? num_taller - 1 : 0;
-    }
     if (cursor < 0) cursor = 0;
 }
