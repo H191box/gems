@@ -10,13 +10,14 @@
 #include "opalo.h"
 #include "thumb_cache.h"
 #include "ciudades.h"
+#include "menu.h"
 
 #define LIST_W      115
 #define LIST_ITEM_H  14
 #define LIST_ITEMS    8
 #define SCROLL_MAX   (MAX_GALERIA - LIST_ITEMS)
 
-#define THUMB_X     146
+#define THUMB_X     125
 #define THUMB_Y      18
 
 static const char* NOMBRE_TIPO[4] = {
@@ -26,15 +27,13 @@ static const char* NOMBRE_TIPO[4] = {
     "OPALO BLANCO"
 };
 
-static const char* NOMBRE_PATRON[4] = {
+static const char* NOMBRE_PATRON[6] = {
     "NEBULA",
     "VENAS",
     "MOSAICO",
-    "CHAOS"
-};
-
-static const char* NOMBRE_TAM[5] = {
-    "S", "M", "L", "XL", "XXL"
+    "CHAOS",
+    "MATRIX",
+    "HARLEQUIN"
 };
 
 typedef enum {
@@ -50,6 +49,11 @@ static int          num_items;
 static int          cursor;
 static int          scroll;
 static int          opcion_submenu;
+
+static void generar_opalo_desde_chunk(Opalo* o, const Chunk* c) {
+    generar_opalo(o, c->seed);
+    o->quilates = c->quilates;
+}
 
 static void init_paleta_ui(void) {
     volatile uint16_t* pal = (volatile uint16_t*)0x05000000;
@@ -67,14 +71,9 @@ static void clear_vram(uint16_t* vram) {
     for (int i = 0; i < 19200; i++) vram[i] = 0;
 }
 
-static void u8_to_dec(uint8_t v, char* buf) {
-    buf[0] = '0' + (v / 10);
-    buf[1] = '0' + (v % 10);
-}
-
 static uint32_t calcular_valor_opalo_wrapper(int idx) {
     Opalo o;
-    generar_opalo(&o, items[idx].seed);
+    generar_opalo_desde_chunk(&o, &items[idx]);
     return calcular_valor_opalo(&o);
 }
 
@@ -110,13 +109,11 @@ static void vender_item_seleccionado(int idx_lista) {
     decrementar_num_chunks();
 }
 
-/* ---- render_thumb: ahora pasa tamanyo a renderizar_opalo_pequeno ---- */
 static void render_thumb(int idx) {
     if (items[idx].cortado) {
         Opalo o;
-        generar_opalo(&o, items[idx].seed);
-        generar_paleta(&o);
-        renderizar_opalo_pequeno(THUMB_X, THUMB_Y, &o, items[idx].tamanyo);
+        generar_opalo_desde_chunk(&o, &items[idx]);
+        renderizar_opalo_pequeno(THUMB_X, THUMB_Y, &o, items[idx].quilates);
     } else {
         renderizar_roca_pequena(THUMB_X, THUMB_Y, &items[idx]);
     }
@@ -150,7 +147,6 @@ static void render_ficha(int idx) {
 }
 
 static void render_lista(void) {
-    init_paleta_ui();
     uint16_t* vram = get_vram();
     clear_vram(vram);
 
@@ -167,6 +163,7 @@ static void render_lista(void) {
         draw_text(vram, 10,  70, "GALERIA VACIA", 255);
         draw_text(vram, 10,  85, "CORTA O MUEVE", 255);
         draw_text(vram, 10, 100, "EN EL TALLER",  255);
+        init_paleta_ui();
         flip();
         return;
     }
@@ -186,7 +183,7 @@ static void render_lista(void) {
 
         if (items[idx].cortado) {
             Opalo o;
-            generar_opalo(&o, items[idx].seed);
+            generar_opalo_desde_chunk(&o, &items[idx]);
             int t = (o.tipo >= 0 && o.tipo < 4) ? o.tipo : 0;
             draw_text(vram, 20, y + 3, NOMBRE_TIPO[t], 255);
         } else {
@@ -208,16 +205,15 @@ static void render_lista(void) {
 
         if (items[cursor].cortado) {
             Opalo o;
-            generar_opalo(&o, items[cursor].seed);
+            generar_opalo_desde_chunk(&o, &items[cursor]);
             int t = (o.tipo >= 0 && o.tipo < 4) ? o.tipo : 0;
 
             draw_text(vram, x, y, NOMBRE_TIPO[t], 255); y += 12;
             draw_text(vram, x, y, NOMBRE_PATRON[o.patron], 255); y += 14;
 
-            uint32_t valor = calcular_valor_opalo_wrapper(cursor);
-            sprintf(val_buf, "VALOR: %d", valor);
+            uint32_t valor = calcular_valor_opalo(&o);
+            sprintf(val_buf, "VALOR: %lu", valor);
             draw_text(vram, x, y, val_buf, 255); y += 14;
-
         } else {
             char buf[24];
             draw_text(vram, x, y, "CHUNK SIN CORTAR", 255); y += 14;
@@ -226,7 +222,7 @@ static void render_lista(void) {
             draw_text(vram, x, y, buf, 255); y += 12;
 
             uint32_t valor = calcular_valor_chunk_bruto(cursor);
-            sprintf(val_buf, "VALOR: %d", valor);
+            sprintf(val_buf, "VALOR: %lu", valor);
             draw_text(vram, x, y, val_buf, 255); y += 14;
         }
 
@@ -259,16 +255,18 @@ static void render_lista(void) {
 
 static void render_imagen(int idx) {
     Opalo o;
-    generar_opalo(&o, items[idx].seed);
-    generar_paleta(&o);
-    renderizar_opalo(&o);
+    generar_opalo_desde_chunk(&o, &items[idx]);
 
-    volatile uint16_t* pal = (volatile uint16_t*)0x05000000;
-    pal[255] = 0x7FFF;
+    renderizar_opalo(&o);
 
     uint16_t* vram = get_vram();
     draw_text(vram, 2, 2,   NOMBRE_TIPO[o.tipo], 255);
     draw_text(vram, 2, 150, "B:VOLVER  IZQ/DER:CAMBIAR", 255);
+
+    generar_paleta(&o);
+    volatile uint16_t* pal = (volatile uint16_t*)0x05000000;
+    pal[255] = 0x7FFF;
+
     flip();
 }
 
@@ -289,8 +287,12 @@ void galeria_init(void) {
 
 void galeria_input(uint16_t keys) {
 
-    if (vista == VISTA_LISTA) {
+    if (keys & KEY_START) {
+        volver_menu();
+        return;
+    }
 
+    if (vista == VISTA_LISTA) {
         if ((keys & KEY_DOWN) && cursor + 1 < num_items) {
             cursor++;
             if (cursor >= scroll + LIST_ITEMS)
@@ -337,7 +339,7 @@ void galeria_input(uint16_t keys) {
             render_lista();
         }
 
-    } else { // VISTA_IMAGEN
+    } else { /* VISTA_IMAGEN */
 
         if (keys & KEY_B) {
             vista = VISTA_LISTA;

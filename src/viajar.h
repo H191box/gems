@@ -4,10 +4,6 @@
 #include <stdint.h>
 
 void viajar_init(void);
-
-// Ahora devuelve int en lugar de void
-int viajar_input(uint16_t keys); 
-
-void render_viaje(int cursor);
+void viajar_input(uint16_t keys);
 
 #endif

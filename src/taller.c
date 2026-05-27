@@ -8,6 +8,7 @@
 #include "font.h"
 #include "opalo.h"
 #include "plasma.h"
+#include "menu.h"
 
 #define LIST_W      115
 #define LIST_ITEM_H 14
@@ -15,6 +16,21 @@
 
 #define THUMB_X     146
 #define THUMB_Y      18
+
+static const char* TEXTO_FORMA[4] = {
+    "LINEAL",
+    "RAMIFICADA",
+    "ESPIRAL",
+    "CAOTICA"
+};
+
+static const char* TEXTO_INTENSIDAD[5] = {
+    "",
+    "DEBIL",
+    "MEDIA",
+    "FUERTE",
+    "EXTREMA"
+};
 
 static Chunk taller_items[MAX_TALLER];
 static int   num_taller;
@@ -92,7 +108,22 @@ static void render_taller(void) {
         draw_text(vram, x, y, buf, 255); y += 12;
 
         sprintf(buf, "GRIETAS:%d", c->grietas);
-        draw_text(vram, x, y, buf, 255); y += 14;
+        draw_text(vram, x, y, buf, 255);
+        y += 12;
+
+        if (c->grietas) {
+            sprintf(buf, "INT:%s", TEXTO_INTENSIDAD[c->intensidad_grieta]);
+            draw_text(vram, x, y, buf, 255);
+            y += 12;
+
+            sprintf(buf, "FORMA:%s", TEXTO_FORMA[c->forma_grieta]);
+            draw_text(vram, x, y, buf, 255);
+            y += 12;
+
+            sprintf(buf, "PUREZA:%d?", c->pureza_aprox);
+            draw_text(vram, x, y, buf, 255);
+            y += 14;
+        }
 
         if (c->grietas > 0 && c->pista > 0) {
             static const char* PISTA_TEXTO[5] = {
@@ -115,11 +146,11 @@ static void render_taller(void) {
         fill_rect(vram, sm_x + 2, sm_y + 2, sm_w - 4, sm_h - 4, 5);
 
         if (opcion_submenu == 0) {
-            draw_text(vram, sm_x + 6, sm_y + 8,  "> CORTAR",         255);
-            draw_text(vram, sm_x + 6, sm_y + 24, "  MOVER GALERIA",  255);
+            draw_text(vram, sm_x + 6, sm_y + 8,  "> CORTE NORMAL",  255);
+            draw_text(vram, sm_x + 6, sm_y + 24, "  MOVER GALERIA", 255);
         } else {
-            draw_text(vram, sm_x + 6, sm_y + 8,  "  CORTAR",         255);
-            draw_text(vram, sm_x + 6, sm_y + 24, "> MOVER GALERIA",  255);
+            draw_text(vram, sm_x + 6, sm_y + 8,  "  CORTE NORMAL",  255);
+            draw_text(vram, sm_x + 6, sm_y + 24, "> MOVER GALERIA", 255);
         }
     }
 
@@ -129,42 +160,60 @@ static void render_taller(void) {
 
 static void cortar_chunk_seleccionado(void) {
     Chunk c = taller_items[cursor];
-    c.cortado = 1;
-    guardar_chunk(&c);
+    uint32_t h = c.seed;
 
+    int perdida = 0;
+    if (c.pureza_aprox < 45)
+        perdida = 35;
+    else if (c.pureza_aprox < 70)
+        perdida = 20;
+    else
+        perdida = 10;
+
+    uint32_t r = (h >> 12) & 99;
+
+    if (r < perdida)
+        c.quilates = (c.quilates * 65) / 100;
+    else if (r > 92)
+        c.quilates = (c.quilates * 95) / 100;
+
+    c.cortado = 1;
+
+    guardar_chunk(&c);
     reset_taller();
     for (int i = 0; i < num_taller; i++) {
         if (i != cursor) guardar_chunk_taller(&taller_items[i]);
     }
-
     taller_recargar();
 }
 
 static void mover_a_galeria(void) {
     Chunk c = taller_items[cursor];
     guardar_chunk(&c);
-
     reset_taller();
     for (int i = 0; i < num_taller; i++) {
         if (i != cursor) guardar_chunk_taller(&taller_items[i]);
     }
-
     taller_recargar();
 }
 
 void taller_init(void) {
     taller_recargar();
-    cursor       = 0;
-    scroll       = 0;
-    vista_taller = TALLER_LISTA;
+    cursor         = 0;
+    scroll         = 0;
+    vista_taller   = TALLER_LISTA;
     opcion_submenu = 0;
     render_taller();
 }
 
 void taller_input(uint16_t keys) {
 
-    if (vista_taller == TALLER_LISTA) {
+    if (keys & KEY_START) {
+        volver_menu();
+        return;
+    }
 
+    if (vista_taller == TALLER_LISTA) {
         if ((keys & KEY_DOWN) && cursor + 1 < num_taller) {
             cursor++;
             if (cursor >= scroll + LIST_ITEMS)
@@ -181,9 +230,7 @@ void taller_input(uint16_t keys) {
             opcion_submenu = 0;
             render_taller();
         }
-
     } else {
-
         if ((keys & KEY_UP) || (keys & KEY_DOWN)) {
             opcion_submenu = !opcion_submenu;
             render_taller();
@@ -193,11 +240,10 @@ void taller_input(uint16_t keys) {
             render_taller();
         }
         if (keys & KEY_A) {
-            if (opcion_submenu == 0) {
+            if (opcion_submenu == 0)
                 cortar_chunk_seleccionado();
-            } else {
+            else
                 mover_a_galeria();
-            }
             vista_taller = TALLER_LISTA;
             render_taller();
         }

@@ -14,6 +14,8 @@ void fill_rect(uint16_t* vram, int x, int y, int w, int h, uint8_t c);
 void clear(uint16_t* vram, uint8_t color);
 
 // Efectos
-void fundido_a_negro(void);
+
+void fade_out(void);
+void fade_in(void);
 
 #endif

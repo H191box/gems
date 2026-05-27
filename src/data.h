@@ -11,6 +11,8 @@ typedef struct {
     uint16_t tasa_venta;   // Multiplicador de precio
 } Ciudad;
 
+
+
 // Definición de las 3 ciudades (accesibles desde otros archivos)
 extern const Ciudad ciudades[3];
 
