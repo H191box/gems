@@ -22,6 +22,14 @@
 #define SAVE_MAGIC   "OPAL"
 #define SAVE_VERSION 10  // Sistema de gemas + persistencia espacial
 
+// 🟢 DECLARACIÓN DE VARIABLES GLOBALES EXTERNAS
+extern uint8_t dia_actual;
+extern uint8_t mes_actual;
+extern int pos_x;
+extern int pos_y;
+extern int ciudad_actual_idx;
+
+
 // ============================================================
 // SAVE HEADER STRUCT
 // ============================================================
@@ -45,7 +53,7 @@ typedef struct {
     uint32_t num_gemas;     // 0x20 
 
     uint32_t next_gema_id;  // 0x24   
-} SaveHeader;
+} __attribute__((packed)) SaveHeader; // 👈 ¡PÓNLO JUSTO AQUÍ!
 
 static int sram_inicializada = 0;
 
@@ -90,18 +98,18 @@ static int save_valido(void) {
            h.version == SAVE_VERSION;
 }
 
-// ============================================================
-// INIT
-// ============================================================
-
 void save_init(void) {
     if (sram_inicializada) return;
     sram_inicializada = 1;
 
-    extern int pos_x, pos_y;
-    extern int ciudad_actual_idx;
+    // Acceso directo a la paleta de la GBA para pintar el fondo de la pantalla
+    volatile uint16_t* paleta_bg = (volatile uint16_t*)0x05000000;
 
     if (save_valido()) {
+        // 🟢 ¡SI ENTRA AQUÍ, EL SAVE ES VÁLIDO Y SE ENTIENDE!
+        // Pintamos el fondo de VERDE para saber que ha leído bien la firma "OPAL"
+        paleta_bg[0] = (31 << 5); // Verde puro en formato BGR555
+
         SaveHeader h;
         sram_read(&h, SRAM_BASE + SRAM_HEADER, sizeof(SaveHeader));
 
@@ -109,28 +117,37 @@ void save_init(void) {
         mes_actual = h.mes;
         pos_x = h.pos_x;
         pos_y = h.pos_y;
-        ciudad_actual_idx = pos_y * 5 + pos_x;
+        ciudad_actual_idx = h.ciudad;
+
+        // Congelar el juego 2 segundos (aproximadamente 120 frames de VBlank)
+        // para que nos dé tiempo a ver el color verde en el emulador
+        for(int i = 0; i < 120; i++) {
+            while(*(volatile uint16_t*)0x04000006 >= 160);
+            while(*(volatile uint16_t*)0x04000006 < 160);
+        }
         return;
     }
 
-    // Inicializar nueva partida limpia
-    SaveHeader h = {0};
+    // 🔴 ¡SI ENTRA AQUÍ, EL SAVE SE CONSIDERA CORRUPTO O NUEVO!
+    // Pintamos el fondo de ROJO para saber que ha fallado la validación
+    paleta_bg[0] = 31; // Rojo puro en formato BGR555
 
-    h.magic[0]='O'; h.magic[1]='P'; h.magic[2]='A'; h.magic[3]=='L';
+    // Congelar el juego 2 segundos para ver el color rojo
+    for(int i = 0; i < 120; i++) {
+        while(*(volatile uint16_t*)0x04000006 >= 160);
+        while(*(volatile uint16_t*)0x04000006 < 160);
+    }
+
+    // Inicializar nueva partida limpia de forma normal...
+    SaveHeader h = {0};
+    h.magic[0]='O'; h.magic[1]='P'; h.magic[2]='A'; h.magic[3]='L';
     h.version      = SAVE_VERSION;
     h.current_seed = 1234567;
-
     h.dia = 1;
     h.mes = 1;
-
     h.pos_x = 2;
     h.pos_y = 2;
-
-    h.num_gal = 0;
-    h.num_taller = 0;
-    h.num_gal2 = 0;
-    h.num_gemas = 0;   
-    h.next_gema_id = 1;
+    h.ciudad = 12;
 
     escribir_header(&h);
 
@@ -141,7 +158,6 @@ void save_init(void) {
     pos_y = 2;
     ciudad_actual_idx = 12;
 }
-
 // ============================================================
 // GEMAS API
 // ============================================================

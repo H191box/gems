@@ -64,11 +64,11 @@ uint32_t obtener_dinero(void);
 void     modificar_dinero(int32_t cantidad);
 
 // ============================================================
-// ESTADO MUNDIAL
+// ESTADO MUNDIAL Y PERSISTENCIA ESPACIAL
 // ============================================================
 
 void     sync_save_world_state(void);
-void     obtener_posicion(int* x, int* y);
-void     guardar_posicion(int x, int y);
+uint32_t cargar_seed(void);
+void     guardar_seed(uint32_t seed);
 
 #endif // SAVE_H

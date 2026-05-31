@@ -14,40 +14,32 @@
 #include "data.h"
 #include "ciudades.h"
 
+// ============================================================
+// DEFINICIÓN DE VARIABLES GLOBALES (Estado del Juego y Mundo)
+// ============================================================
 EstadoJuego estado = ESTADO_MENU;
 
-extern int ciudad_actual_idx;
 
 // ----------------------------------------------------
 // GENERADOR DE SEMILLA CON ENTROPÍA REAL
-// Combina tres fuentes:
-//   1. Timer de CPU — depende de cuántos ciclos pasaron
-//      desde el encendido hasta que el jugador llega al menú
-//   2. Scanline actual (VCOUNT) — varía en microsegundos
-//   3. Semilla anterior del save — encadena sesiones
 // ----------------------------------------------------
 static uint32_t generar_semilla_inicial(void) {
-    // Arrancar timer 0 libre (prescaler /1 = 1 tick por ciclo de CPU)
     REG_TM0CNT_H = 0;          // parar y resetear
     REG_TM0CNT_L = 0;
     REG_TM0CNT_H = (1 << 7);   // arrancar
 
-    // Esperar un frame completo para que el timer acumule variación
-    // (el jugador ya ha pulsado algo para llegar aquí)
     uint16_t t1 = REG_TM0CNT_L;
     uint16_t vc = REG_VCOUNT;
 
-    // Detener timer
     REG_TM0CNT_H = 0;
 
     uint32_t prev = cargar_seed();
 
-    // Mezclar las tres fuentes
+    // Mezclar las fuentes de hardware para aleatoriedad real
     uint32_t s = prev;
     s ^= (uint32_t)t1 << 16;
     s ^= (uint32_t)vc << 8;
     s ^= (uint32_t)t1;
-    // Hash final para distribuir bien los bits
     s ^= s >> 16;
     s *= 0x45d9f3b;
     s ^= s >> 16;
@@ -56,27 +48,36 @@ static uint32_t generar_semilla_inicial(void) {
     return s;
 }
 
+// ----------------------------------------------------
+// PUNTO DE ENTRADA PRINCIPAL
+// ----------------------------------------------------
 int main() {
+    // Configurar el modo de vídeo (Modo 4 indexado con Doble Buffer)
     REG_DISPCNT = MODE_4 | BG2_ENABLE;
 
-    dia_actual = 1;
-    mes_actual = 1;
-
+    // 1. Inicializar la SRAM y comprobar si hay partida guardada válida.
+    // ¡Sincronización crítica! Al ejecutarse, rellenará automáticamente 
+    // dia_actual, mes_actual, pos_x, pos_y y ciudad_actual_idx con los datos guardados.
     save_init();
 
-    // Generar semilla con entropía antes de iniciar la mina
+    // 2. Generar semilla con entropía antes de iniciar la mina
     uint32_t semilla = generar_semilla_inicial();
     guardar_seed(semilla);
     mina_init_semilla(semilla);
 
+    sync_save_world_state();
+
+    // 3. Cargar entorno visual basándose en la ciudad recuperada de la SRAM
     aplicar_paleta_segun_bioma(ciudad_actual_idx);
     dibujar_menu(0);
     fade_in();
 
+    // 4. Bucle principal del juego (Game Loop)
     while (1) {
         scanKeys();
         uint16_t keys = keysDown();
 
+        // Enrutar los inputs según el estado del juego
         switch (estado) {
             case ESTADO_MENU:    menu_input(keys);    break;
             case ESTADO_MINA:    mina_input(keys);    break;
@@ -87,6 +88,11 @@ int main() {
             case ESTADO_VIAJAR:  viajar_input(keys);  break;
             default: break;
         }
+
+        // Sincronización de refresco Vertical (VBlank) 
+        // Evita el screen tearing (pantalla partida) y ralentiza el bucle a 60 FPS estables
+        while (REG_VCOUNT >= 160);
+        while (REG_VCOUNT < 160);
     }
 
     return 0;
