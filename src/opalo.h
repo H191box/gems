@@ -1,16 +1,21 @@
 #ifndef OPALO_H
 #define OPALO_H
+
 #include <stdint.h>
+
+/* Declaración adelantada para evitar errores de referencia circular */
+typedef struct Gema Gema;
 
 extern int COLOR_PRUEBA;
 
-
 typedef enum {
-    OPALO_NEGRO,
-    OPALO_CRISTAL,
-    OPALO_FUEGO,
-    OPALO_BLANCO,
-    OPALO_LEGENDARIO
+    OPALO_NEGRO    = 0,
+    OPALO_CRISTAL  = 1,
+    OPALO_FUEGO    = 2,
+    OPALO_BLANCO   = 3,
+    OPALO_ROSA     = 4,
+    OPALO_GRIS     = 5,
+    NUM_TIPOS_OPALO
 } TipoOpalo;
 
 typedef enum {
@@ -49,9 +54,15 @@ typedef struct {
     uint8_t ciudad_id;
 } Chunk;
 
+/* --- Prototipos de Funciones --- */
+
+// Generación de ópalos y atributos
 void generar_opalo(Opalo* o, uint32_t seed);
+void calcular_atributos_gema(Gema* g, uint32_t seed, uint8_t bioma);
+
+// Gestión de chunks
 void generar_chunk(Chunk* c, uint32_t seed);
 void aplicar_bonus_region(Opalo* o, Chunk* c);
 uint32_t calcular_valor_opalo(const Opalo* o);
 
-#endif
+#endif // OPALO_H

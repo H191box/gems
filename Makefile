@@ -10,7 +10,7 @@ CC      := $(DEVKITARM)/bin/arm-none-eabi-gcc
 OBJCOPY := $(DEVKITARM)/bin/arm-none-eabi-objcopy
 
 # -------------------------------------------------------
-# FLAGS
+# COMPILACIÓN
 # -------------------------------------------------------
 CFLAGS := \
 	-mthumb \
@@ -19,9 +19,13 @@ CFLAGS := \
 	-O2 \
 	-ffunction-sections \
 	-fdata-sections \
+	-fno-common \
 	-I$(LIBGBA)/include \
 	-I$(SRC)
 
+# -------------------------------------------------------
+# LINKER (IMPORTANTE: usar gba.specs)
+# -------------------------------------------------------
 LDFLAGS := \
 	-mthumb \
 	-mthumb-interwork \
@@ -30,10 +34,11 @@ LDFLAGS := \
 	-L$(LIBGBA)/lib \
 	-lgba \
 	-Wl,--gc-sections \
-	-Wl,-Map,$(BUILD)/$(TARGET).map
+	-Wl,-Map,$(BUILD)/$(TARGET).map \
+	-Wl,--no-warn-rwx-segments
 
 # -------------------------------------------------------
-# SOURCES (IMPORTANTE: asegúrate de incluir main.c)
+# SOURCES
 # -------------------------------------------------------
 SOURCES := $(wildcard $(SRC)/*.c)
 OBJECTS := $(patsubst $(SRC)/%.c,$(BUILD)/%.o,$(SOURCES))
@@ -46,15 +51,12 @@ all: $(BUILD) $(TARGET).gba
 $(BUILD):
 	mkdir -p $(BUILD)
 
-# compilar cada .c a .o
 $(BUILD)/%.o: $(SRC)/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# link ELF (AQUÍ ESTÁ LA CLAVE)
 $(TARGET).elf: $(OBJECTS)
 	$(CC) $(OBJECTS) $(LDFLAGS) -o $@
 
-# convertir a ROM GBA
 $(TARGET).gba: $(TARGET).elf
 	$(OBJCOPY) -O binary $< $@
 	@echo "ROM generada: $(TARGET).gba"

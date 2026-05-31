@@ -1,6 +1,8 @@
 #ifndef GALERIA_H
 #define GALERIA_H
 
+
+
 #include <stdint.h>
 
 void galeria_init(void);

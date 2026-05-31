@@ -1,10 +1,8 @@
 #include <gba_video.h>
-#include "video.h"
+#include <gba_dma.h>
+#include "video.h" // Aquí ya están definidos FRONT y BACK
 
-#define FRONT ((uint16_t*)0x06000000)
-#define BACK  ((uint16_t*)0x0600A000)
 #define BACKBUFFER 0x10
-
 #define PAL_BG   ((volatile uint16_t*)0x05000000)
 #define PAL_SIZE 256
 
@@ -71,6 +69,15 @@ void clear(uint16_t* vram, uint8_t color) {
     for (int i = 0; i < 19200; i++)
         vram[i] = packed;
 }
+
+
+// Añade esto en video.c
+void clear_vram_con_color(uint16_t* vram, uint8_t color) {
+    uint16_t packed = ((uint16_t)color << 8) | color;
+    for (int i = 0; i < 19200; i++)
+        vram[i] = packed;
+}
+
 
 // --------------------------------------------------
 // Helpers internos
@@ -153,4 +160,6 @@ void fade_in(void) {
     for (int i = 0; i < PAL_SIZE; i++)
         PAL_BG[i] = pal_target[i];
 }
+
+
 

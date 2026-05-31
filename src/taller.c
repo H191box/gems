@@ -3,6 +3,7 @@
 #include <gba_video.h>
 #include <gba_input.h>
 #include "taller.h"
+#include "gema_render.h"
 #include "save.h"
 #include "video.h"
 #include "font.h"
@@ -92,9 +93,17 @@ static void render_taller(void) {
         draw_text(vram, LIST_W / 2 - 4, 150, "v", 255);
 
     if (cursor < num_taller) {
-        Chunk* c = &taller_items[cursor];
+    Chunk* c = &taller_items[cursor];
+ // --- SOLUCIÓN: Convertir Chunk a Gema temporal para el renderizado ---
+        Gema g_temp;
+        // Asumimos un ID nulo y bioma 0 ya que es para previsualización
+        crear_gema_desde_chunk(&g_temp, c, GEMA_ID_NULO, 0); 
+        g_temp.etapa = ETAPA_BRUTA; // Forzamos la etapa bruta para que no revele detalles
 
-        renderizar_roca_pequena(THUMB_X, THUMB_Y, c);
+        // Pasamos el puntero a la gema temporal
+        renderizar_roca_pequena(THUMB_X, THUMB_Y, &g_temp);
+        // ----------------------------------------------------------------------
+
         init_paleta_ui();
 
         int x = LIST_W + 4;
@@ -147,10 +156,10 @@ static void render_taller(void) {
 
         if (opcion_submenu == 0) {
             draw_text(vram, sm_x + 6, sm_y + 8,  "> CORTE NORMAL",  255);
-            draw_text(vram, sm_x + 6, sm_y + 24, "  MOVER GALERIA", 255);
+            draw_text(vram, sm_x + 6, sm_y + 24, "  TIRAR", 255);
         } else {
             draw_text(vram, sm_x + 6, sm_y + 8,  "  CORTE NORMAL",  255);
-            draw_text(vram, sm_x + 6, sm_y + 24, "> MOVER GALERIA", 255);
+            draw_text(vram, sm_x + 6, sm_y + 24, "> TIRAR", 255);
         }
     }
 
@@ -187,9 +196,8 @@ static void cortar_chunk_seleccionado(void) {
     taller_recargar();
 }
 
-static void mover_a_galeria(void) {
-    Chunk c = taller_items[cursor];
-    guardar_chunk(&c);
+static void eliminar_chunk(void) {
+    // Al no llamar a guardar_chunk(&c), el chunk simplemente desaparece
     reset_taller();
     for (int i = 0; i < num_taller; i++) {
         if (i != cursor) guardar_chunk_taller(&taller_items[i]);
@@ -243,7 +251,7 @@ void taller_input(uint16_t keys) {
             if (opcion_submenu == 0)
                 cortar_chunk_seleccionado();
             else
-                mover_a_galeria();
+              eliminar_chunk();
             vista_taller = TALLER_LISTA;
             render_taller();
         }

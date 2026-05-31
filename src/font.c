@@ -69,51 +69,40 @@ static const uint8_t font_data[][7] = {
     {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F}, // Z
 };
 
-// -------------------------------------------------------
-// Pixel helper (Mode 4)
-// -------------------------------------------------------
 static void put_pixel(uint16_t* vram, int x, int y, uint8_t color) {
     if (x < 0 || x >= 240 || y < 0 || y >= 160) return;
-
     int idx = y * 120 + x / 2;
-
-    if (x & 1)
-        vram[idx] = (vram[idx] & 0x00FF) | ((uint16_t)color << 8);
-    else
-        vram[idx] = (vram[idx] & 0xFF00) | color;
+    if (x & 1) vram[idx] = (vram[idx] & 0x00FF) | ((uint16_t)color << 8);
+    else vram[idx] = (vram[idx] & 0xFF00) | color;
 }
 
-// -------------------------------------------------------
-// Render text
-// -------------------------------------------------------
 void draw_text(uint16_t* vram, int x, int y, const char* str, uint8_t color) {
+    // Usamos el color 1 como sombra universal por defecto
+    draw_text_shadow(vram, x, y, str, color, 1);
+}
+// Nueva función de texto con sombra
+void draw_text_shadow(uint16_t* vram, int x, int y, const char* str, uint8_t color, uint8_t shadow_color) {
     int cx = x;
-
     while (*str) {
         char ch = *str++;
-
-        if (ch >= 'a' && ch <= 'z')
-            ch -= 32;
-
+        if (ch >= 'a' && ch <= 'z') ch -= 32;
         int idx = (int)ch - 32;
-
         if (idx < 0 || idx >= (int)(sizeof(font_data) / sizeof(font_data[0]))) {
             cx += FONT_WIDTH + 1;
             continue;
         }
-
         const uint8_t* glyph = font_data[idx];
-
         for (int row = 0; row < FONT_HEIGHT; row++) {
             uint8_t bits = glyph[row];
-
             for (int col = 0; col < FONT_WIDTH; col++) {
                 if (bits & (0x10 >> col)) {
+                    // Sombra
+                    put_pixel(vram, cx + col + 1, y + row + 1, shadow_color);
+                    // Letra
                     put_pixel(vram, cx + col, y + row, color);
                 }
             }
         }
-
         cx += FONT_WIDTH + 1;
     }
 }

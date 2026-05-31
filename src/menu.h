@@ -3,7 +3,8 @@
 
 #include <stdint.h>
 
-void aplicar_paleta_segun_ciudad(int idx);
+// Añade esto a menu.h
+void aplicar_paleta_segun_bioma(int idx);
 void dibujar_menu(int opcion);
 void menu_input(uint16_t keys);
 void volver_menu(void);

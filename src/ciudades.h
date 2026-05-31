@@ -1,14 +1,23 @@
+#ifndef CIUDADES_H
+#define CIUDADES_H
+
+#include <stdint.h>
+
+// Cantidad total de ciudades en el mapa
+#define NUM_TOTAL_CIUDADES 25
+
 typedef struct {
     char nombre[16];
-    uint16_t color_paleta; // O índice de paleta
+    uint16_t color_paleta;
     char descripcion[64];
-    uint8_t dificultad;    // Probabilidad de mejores ópalos
-    uint16_t tasa_venta;   // Multiplicador de precio
+    uint8_t dificultad;
+    uint16_t tasa_venta;
+    int x;
+    int y;
+    uint8_t bioma_id; 
 } Ciudad;
 
-// Definición de las 3 ciudades
-static const Ciudad ciudades[3] = {
-    {"Valle Ceniza",   0x738F, "Tierra quemada, rica en gemas oscuras.", 1, 100},
-    {"Costa Rosa",     0x7C1F, "Brillantes cristales pulidos por el mar.", 2, 150},
-    {"Llanura Cristal", 0x5FFF, "Vastos campos de cuarzo puro.", 3, 200}
-};
+// Declaramos que el array existe en algún lugar del programa
+extern const Ciudad ciudades[NUM_TOTAL_CIUDADES];
+
+#endif // CIUDADES_H

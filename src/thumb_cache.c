@@ -1,6 +1,6 @@
 #include "thumb_cache.h"
-
 #include "plasma.h"
+#include "gema.h"  // Añadido para tener acceso a Gema y opalo_to_gema
 
 // --------------------------------------------------
 // VRAM helper
@@ -42,8 +42,11 @@ void thumb_generar(
 ) {
 
     Opalo o;
-
     generar_opalo(&o, seed);
+
+    // Creamos una estructura Gema intermedia fiel a nuestro plan de migración
+    Gema g_temp;
+    opalo_to_gema(&o, &g_temp);
 
     // mini-paleta simple
     for (int i = 0; i < 16; i++) {
@@ -101,12 +104,13 @@ void thumb_generar(
             int px =
                 (x * 240) / THUMB_W;
 
+            // Ahora pasamos la gema adaptada, satisfaciendo el prototipo esperado
             uint8_t p =
                 plasma_pixel(
                     px,
                     py,
                     off,
-                    &o
+                    &g_temp
                 );
 
             // reducir 0-255 → 0-15

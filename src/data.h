@@ -2,26 +2,21 @@
 #define DATA_H
 
 #include <stdint.h>
-
-typedef struct {
-    char nombre[16];
-    uint16_t color_paleta;
-    char descripcion[64];
-    uint8_t dificultad;    // Probabilidad de mejores ópalos
-    uint16_t tasa_venta;   // Multiplicador de precio
-} Ciudad;
+#include "ciudades.h" // Incluimos para tener acceso al struct Ciudad completo
 
 
+extern int ciudad_actual_idx;
 
-// Definición de las 3 ciudades (accesibles desde otros archivos)
-extern const Ciudad ciudades[3];
+// Ahora usamos 25 ciudades
+extern const Ciudad ciudades[25];
 
-// Variables globales para gestionar la fecha y ubicación actual
+// Variables globales para gestionar la fecha y posición (coordenadas)
 extern uint8_t dia_actual;
 extern uint8_t mes_actual;
-extern uint8_t ciudad_actual_idx;
+extern int pos_x; // Nueva variable de posición X
+extern int pos_y; // Nueva variable de posición Y
 
-// Función para avanzar el calendario (ej: al viajar o comprar)
+// Función para avanzar el calendario
 void avanzar_tiempo(void);
 
 #endif // DATA_H
