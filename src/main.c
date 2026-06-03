@@ -4,8 +4,7 @@
 #include <gba_timers.h>
 #include "video.h"
 #include "menu.h"
-#include "mina.h"
-#include "taller.h"
+// ELIMINADOS: mina.h y taller.h ya no se incluyen
 #include "galeria.h"
 #include "tienda.h"
 #include "viajar.h"
@@ -60,10 +59,10 @@ int main() {
     // dia_actual, mes_actual, pos_x, pos_y y ciudad_actual_idx con los datos guardados.
     save_init();
 
-    // 2. Generar semilla con entropía antes de iniciar la mina
+    // 2. Generar semilla con entropía para el sistema global de gacha
     uint32_t semilla = generar_semilla_inicial();
     guardar_seed(semilla);
-    mina_init_semilla(semilla);
+    // ELIMINADO: mina_init_semilla(semilla); ya no es necesario
 
     sync_save_world_state();
 
@@ -77,12 +76,10 @@ int main() {
         scanKeys();
         uint16_t keys = keysDown();
 
-        // Enrutar los inputs según el estado del juego
+        // Enrutar los inputs según el estado actual reducido del juego
         switch (estado) {
             case ESTADO_MENU:    menu_input(keys);    break;
-            case ESTADO_MINA:    mina_input(keys);    break;
-            case ESTADO_FARMEO:  farmeo_input(keys);  break;
-            case ESTADO_TALLER:  taller_input(keys);  break;
+            // ELIMINADOS: ESTADO_MINA, ESTADO_FARMEO y ESTADO_TALLER ya no interceptan inputs
             case ESTADO_TIENDA:  tienda_input(keys);  break;
             case ESTADO_GALERIA: galeria_input(keys); break;
             case ESTADO_VIAJAR:  viajar_input(keys);  break;

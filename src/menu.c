@@ -7,15 +7,18 @@
 #include "save.h"
 #include "data.h"
 #include "game_state.h"
-#include "mina.h"
-#include "taller.h"
+// ELIMINADOS: mina.h y taller.h ya no se incluyen
 #include "galeria.h"
 #include "tienda.h"
 #include "viajar.h"
 #include "ciudades.h"
 
 extern EstadoJuego estado;
-extern int ciudad_actual_idx;
+// Cambiar esto:
+extern uint8_t ciudad_actual_idx;
+
+// Por esto:
+extern uint8_t ciudad_actual_idx;
 
 static int opcion_menu = 0;
 
@@ -49,13 +52,14 @@ void dibujar_menu(int opcion) {
 
     vline(vram, 115, 12, 160, 4);
 
-    // 6 opciones ahora
-    const char* opciones_txt[] = {"FARMEO", "TALLER", "GALERIA", "VITRINA", "TIENDA", "VIAJAR"};
-    for (int i = 0; i < 6; i++) {
-        int y = 16 + (i * 16);  // ligeramente más compacto para caber 6
+    // Reducido a 4 opciones fijas
+    const char* opciones_txt[] = {"GALERIA", "VITRINA", "TIENDA", "VIAJAR"};
+    for (int i = 0; i < 4; i++) {
+        // Al tener menos opciones, les damos un poco más de aire vertical (espaciado de 20px)
+        int y = 20 + (i * 20);  
         uint8_t col = (opcion == i) ? 3 : 2;
-        fill_rect(vram, 0, y, 114, 14, col);
-        draw_text(vram, 10, y + 3, (char*)opciones_txt[i], 255);
+        fill_rect(vram, 0, y, 114, 16, col);
+        draw_text(vram, 10, y + 4, (char*)opciones_txt[i], 255);
     }
 
     int x = 125;
@@ -64,9 +68,8 @@ void dibujar_menu(int opcion) {
     draw_text(vram, x, 20, txt_oro, 255);
     draw_text(vram, x, 35, (char*)ciudades[ciudad_actual_idx].nombre, 255);
 
+    // Descripciones sincronizadas con las 4 opciones restantes
     const char* desc_txt[] = {
-        "BUSCA ROCAS",
-        "CORTA CHUNKS",
         "TUS OPALOS",
         "OPALOS ESPECIALES",
         "COMPRAR SACOS",
@@ -79,31 +82,43 @@ void dibujar_menu(int opcion) {
 
 void menu_input(uint16_t keys) {
     if (keys & KEY_UP) {
-        opcion_menu = (opcion_menu <= 0) ? 5 : opcion_menu - 1;
+        // Límite ajustado a 3 (máximo índice de un array de 4 elementos)
+        opcion_menu = (opcion_menu <= 0) ? 3 : opcion_menu - 1;
         dibujar_menu(opcion_menu);
         flip();
     }
     if (keys & KEY_DOWN) {
-        opcion_menu = (opcion_menu >= 5) ? 0 : opcion_menu + 1;
+        // Límite ajustado a 3
+        opcion_menu = (opcion_menu >= 3) ? 0 : opcion_menu + 1;
         dibujar_menu(opcion_menu);
         flip();
     }
     if (keys & KEY_A) {
-        switch (opcion_menu) {
-            case 0: estado = ESTADO_MINA;    mina_init();    break;
-            case 1: estado = ESTADO_TALLER;  taller_init();  break;
-            case 2: estado = ESTADO_GALERIA; galeria_init(); break;
-            case 3: estado = ESTADO_GALERIA; galeria_init(); break; // entra en galería y lleva a vitrina
-            case 4: estado = ESTADO_TIENDA;  tienda_init();  break;
-            case 5: estado = ESTADO_VIAJAR;  viajar_init();  break;
-        }
+    volatile uint16_t* pal = (volatile uint16_t*)0x05000000;
+
+    switch (opcion_menu) {
+        case 0:
+  
+            estado = ESTADO_GALERIA;
+            galeria_init();
+            break;
+        case 1:
+           
+            estado = ESTADO_GALERIA;
+            galeria_init();
+            break;
+        case 2: estado = ESTADO_TIENDA;  tienda_init();  break;
+        case 3: estado = ESTADO_VIAJAR;  viajar_init();  break;
     }
+}
+
 }
 
 void volver_menu(void) {
     aplicar_paleta_segun_bioma(ciudad_actual_idx);
     dibujar_menu(opcion_menu);
     flip();
+
     estado = ESTADO_MENU;
 }
 

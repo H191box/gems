@@ -16,7 +16,7 @@ int pos_y = 2;
 // La definimos aquí para que sea accesible desde todo el proyecto.
 // El jugador empieza en CENTRO (pos_x=2, pos_y=2), que es el índice 12 en el array.
 // Fórmula: idx = pos_y * 5 + pos_x  →  2*5+2 = 12
-int ciudad_actual_idx = 12;
+uint8_t ciudad_actual_idx = 12;
 
 // Función para avanzar el calendario
 void avanzar_tiempo(void) {

@@ -1,25 +1,112 @@
 #include "sacos.h"
 #include "save.h"
-#include "opalo.h"
+#include "gema.h"
 
-// Variables externas
-extern uint8_t ciudad_actual_idx; 
+/* Variables externas */
+extern uint8_t ciudad_actual_idx;
 extern uint8_t dia_actual;
 extern uint8_t mes_actual;
 
 const Saco SACOS[4] = {
-    {"SACO POBRE", 50, 3, 1},
-    {"SACO MINERO", 200, 6, 2},
+    {"SACO POBRE",       50,  3, 1},
+    {"SACO MINERO",     200,  6, 2},
     {"SACO INDUSTRIAL", 800, 12, 3},
-    {"MEGA CARGAMENTO", 3000, 24, 4}
+    {"MEGA CARGAMENTO",3000, 24, 4}
 };
 
-// Semilla base que evoluciona con el tiempo
+/* Semilla global */
 static uint32_t saco_seed = 0x12345678;
 static uint32_t contador_global = 0;
 
-void comprar_saco(int idx) {
-    if (idx < 0 || idx >= 4) return;
+/* --------------------------------------------------------- */
+/* Caps de quilates por tier                                 */
+/*   Tier 1 (POBRE)      → max  40                          */
+/*   Tier 2 (MINERO)     → max 100                          */
+/*   Tier 3 (INDUSTRIAL) → max 225                          */
+/*   Tier 4 (MEGA)       → max 225                          */
+/* --------------------------------------------------------- */
+static const uint16_t CAP_QUILATES[5] = {
+    0,    /* unused (tier 0) */
+    40,
+    100,
+    225,
+    225,
+};
+
+/* --------------------------------------------------------- */
+/* Generación de quilates                                    */
+/* Unidad: centésimas de quilate — 100 = 1.00 ct            */
+/* El cap se aplica al final para que jackpots sean         */
+/* sorprendentes pero nunca desborden la fórmula de valor.  */
+/* --------------------------------------------------------- */
+static uint16_t generar_quilates(uint32_t seed, uint8_t tier)
+{
+    uint16_t base;
+    uint16_t rango;
+
+    switch (tier)
+    {
+        default:
+        case 1: /* normal: 10 - 35 */
+            base  = 10;
+            rango = 25;
+            break;
+
+        case 2: /* normal: 30 - 85 */
+            base  = 30;
+            rango = 55;
+            break;
+
+        case 3: /* normal: 80 - 200 */
+            base  = 80;
+            rango = 120;
+            break;
+
+        case 4: /* normal: 80 - 200 (mismo techo, jackpot lo diferencia) */
+            base  = 80;
+            rango = 120;
+            break;
+    }
+
+    uint16_t q = base + (uint16_t)(seed % rango);
+
+    /* -------------------------------------------------- */
+    /* JACKPOTS — llevan al límite del cap del tier       */
+    /* -------------------------------------------------- */
+    uint16_t cap = (tier <= 4) ? CAP_QUILATES[tier] : 225;
+
+    uint32_t r = (seed >> 8) % 10000;
+
+    if (r == 0)
+    {
+        /* 1 entre 10000: quilates al máximo del cap */
+        q = cap;
+    }
+    else if (r < 10)
+    {
+        /* 9 entre 10000: 90% del cap */
+        q = (uint16_t)(cap * 9 / 10);
+    }
+    else if (r < 100)
+    {
+        /* 90 entre 10000: 75% del cap */
+        q = (uint16_t)(cap * 3 / 4);
+    }
+
+    /* Seguridad: nunca superar el cap del tier */
+    if (q > cap) q = cap;
+
+    return q;
+}
+
+/* --------------------------------------------------------- */
+/* Compra de saco                                            */
+/* --------------------------------------------------------- */
+
+void comprar_saco(int idx)
+{
+    if (idx < 0 || idx >= 4)
+        return;
 
     const Saco* s = &SACOS[idx];
 
@@ -28,41 +115,30 @@ void comprar_saco(int idx) {
 
     modificar_dinero(-(int32_t)s->precio);
 
-    Chunk temp[MAX_TALLER];
-    int n = cargar_chunks_taller(temp);
+    for (int i = 0; i < s->cantidad_chunks; i++)
+    {
+        Gema nueva_gema;
 
-    for (int i = 0; i < s->cantidad_chunks; i++) {
-        if (n >= MAX_TALLER)
-            break;
+        /* 1. Entropía visual de 16 bits */
+        uint16_t rand_part = (uint16_t)((saco_seed + contador_global++ + (i * 0x9E3779B9u)) & 0xFFFFu);
 
-        Chunk c;
-        // Mezclamos semillas para asegurar que cada chunk sea único
-        uint32_t seed_dinamica = saco_seed + (contador_global++) + (i * 0x9E3779B9);
-        generar_chunk(&c, seed_dinamica);
+        if (rand_part == 0 && ciudad_actual_idx == 0 && dia_actual == 0)
+            rand_part = 1;
 
-        // --- INYECCIÓN DE DATOS PARA LA FICHA ---
-        c.dia = dia_actual;
-        c.mes = mes_actual;
-        c.ciudad_id = ciudad_actual_idx;
-        // ----------------------------------------
+        /* 2. Seed empaquetada: ciudad | dia | entropia */
+        nueva_gema.seed = ((uint32_t)ciudad_actual_idx << 24)
+                        | ((uint32_t)dia_actual        << 16)
+                        | (uint32_t)rand_part;
 
-        // Tier alto: Aumentamos la probabilidad de calidad/rareza 
-        // en lugar de sumar peso artificialmente.
-        if (s->tier >= 2 && c.grietas == 0)
-            c.grietas = 1;
+        /* 3. Quilates con cap por tier */
+        nueva_gema.quilates = generar_quilates(nueva_gema.seed, s->tier);
 
-        if (s->tier >= 3 && c.tamanyo < 2)
-            c.tamanyo = 2;
+        /* 4. Estado inicial */
+        nueva_gema.etapa = ETAPA_BRUTA;
+        nueva_gema.flags = 0;
 
-        // NOTA: Eliminamos la suma artificial de quilates para 
-        // mantener la integridad de la distribución exponencial.
-        // Si el usuario quiere piezas pesadas en un saco, debe ser 
-        // por pura suerte estadística de la semilla.
-
-        guardar_chunk_taller(&c);
-        n++;
+        guardar_gema(&nueva_gema);
     }
 
-    // Refrescamos la semilla base para que la siguiente compra sea impredecible
-    saco_seed += 0x9E3779B9;
+    saco_seed += 0x9E3779B9u;
 }

@@ -5,7 +5,7 @@
 #include "ciudades.h" // Incluimos para tener acceso al struct Ciudad completo
 
 
-extern int ciudad_actual_idx;
+extern uint8_t ciudad_actual_idx;
 
 // Ahora usamos 25 ciudades
 extern const Ciudad ciudades[25];

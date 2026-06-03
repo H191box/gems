@@ -3,23 +3,26 @@
  * Implementación de la entidad Gema — Gacha de Ópalos GBA
  *
  * REGLAS FUNDAMENTALES:
- * 1. La seed se usa UNA SOLA VEZ en crear_gema_desde_chunk().
- * 2. Chunk no se define aquí — viene de opalo.h.
- * 3. El ID se recibe como parámetro — save.proximo_id lo gestiona.
- * 4. El valor se calcula desde atributos reales, sin rareza_real explícita.
- * 5. gema_valor_estimado() solo usa campos visibles en la etapa actual.
+ * 1. La seed empaqueta ciudad_id (bits 31-24), dia (bits 23-16)
+ *    y 16 bits de entropía visual (bits 15-0).
+ * 2. ciudad_id permite reconstruir el bioma → gema_tipo() es fiel
+ *    a la distribución original sin almacenar nada extra.
+ * 3. dia permite mostrar la antigüedad del ópalo en la ficha técnica.
+ * 4. Todo atributo visual o comercial se deriva desde seed.
+ *    Nunca se almacena.
+ * 5. seed == 0 es el centinela de ranura vacía.
  */
 
 #include "gema.h"
-#include "opalo.h"   /* TipoOpalo, PatronOpalo, Chunk, generar_opalo_con_bioma */
+#include "opalo.h"
+#include "ciudades.h"   /* ciudades[], NUM_TOTAL_CIUDADES */
 
 /* ------------------------------------------------------------------ */
-/* Hash interno (no exponer fuera de este módulo)                       */
+/* Hash interno                                                        */
 /* ------------------------------------------------------------------ */
 
 static uint32_t hash32(uint32_t x)
 {
-    /* Mismo algoritmo que opalo.c para coherencia */
     x ^= x >> 16;
     x *= 0x7feb352du;
     x ^= x >> 15;
@@ -28,15 +31,98 @@ static uint32_t hash32(uint32_t x)
     return x;
 }
 
-/* Extrae un valor en [0, rango) para un slot independiente */
-static uint8_t rango_seed(uint32_t seed, uint8_t slot, uint8_t rango)
+/*
+ * Extrae un valor en [0, rango) para un slot independiente.
+ * Opera sobre los 16 bits de entropía para que ciudad_id y dia
+ * no interfieran con los atributos visuales.
+ */
+static uint8_t slot(uint32_t seed, uint8_t s, uint8_t rango)
 {
-    return (uint8_t)(hash32(seed ^ ((uint32_t)slot * 0x9e3779b9u)) % rango);
+    uint32_t entropy = seed & 0xFFFFu;  /* solo los 16 bits de rand */
+    return (uint8_t)(hash32(entropy ^ ((uint32_t)s * 0x9e3779b9u)) % rango);
 }
 
 /* ------------------------------------------------------------------ */
-/* Tabla de visibilidad                                                 */
-/* bits: CAMPO_TIPO | CAMPO_PATRON | CAMPO_BRILLO | CAMPO_PUREZA | CAMPO_VALOR */
+/* Accesores de campos empaquetados en seed                           */
+/* ------------------------------------------------------------------ */
+
+uint8_t gema_ciudad_id(const Gema *g)
+{
+    return (uint8_t)((g->seed >> 24) & 0xFF);
+}
+
+uint8_t gema_dia(const Gema *g)
+{
+    return (uint8_t)((g->seed >> 16) & 0xFF);
+}
+
+uint16_t gema_rand(const Gema *g)
+{
+    return (uint16_t)(g->seed & 0xFFFF);
+}
+
+/* ------------------------------------------------------------------ */
+/* Distribución de tipo por bioma                                     */
+/*                                                                    */
+/* Duplicada desde opalo.c — si cambias allí, cambia aquí también.   */
+/* ------------------------------------------------------------------ */
+
+static const TipoOpalo CICLO[5] = {
+    OPALO_CRISTAL,
+    OPALO_BLANCO,
+    OPALO_ROSA,
+    OPALO_FUEGO,
+    OPALO_NEGRO
+};
+
+static const int8_t BIOMA_AFIN[5] = {
+    0,  /* Bioma 0 Glaciar → CRISTAL */
+    1,  /* Bioma 1 Bosque  → BLANCO  */
+    2,  /* Bioma 2 Costa   → ROSA    */
+    4,  /* Bioma 3 Pantano → NEGRO   */
+    3,  /* Bioma 4 Cañón   → FUEGO   */
+};
+
+static TipoOpalo derivar_tipo(uint32_t seed, uint8_t bioma)
+{
+    uint32_t h = hash32(seed & 0xFFFFu);  /* solo entropía */
+
+    int pesos[6];
+    for (int i = 0; i < 5; i++) pesos[i] = 20;
+    pesos[5] = 20;
+
+    if (bioma < 5) {
+        int afin       = BIOMA_AFIN[bioma];
+        int opuesto    = (afin + 2) % 5;
+        int adj_afin_a = (afin + 1) % 5;
+        int adj_afin_b = (afin + 4) % 5;
+        int adj_op_a   = (opuesto + 1) % 5;
+        int adj_op_b   = (opuesto + 4) % 5;
+
+        pesos[afin]       += 30;
+        pesos[adj_afin_a] += 10;
+        pesos[adj_afin_b] += 10;
+        pesos[opuesto]    -= 30;
+        pesos[adj_op_a]   -= 10;
+        pesos[adj_op_b]   -= 10;
+
+        for (int i = 0; i < 5; i++)
+            if (pesos[i] < 1) pesos[i] = 1;
+    }
+
+    int total = 0;
+    for (int i = 0; i < 6; i++) total += pesos[i];
+
+    int r = (int)((h >> 4) % (uint32_t)total);
+    for (int i = 0; i < 5; i++) {
+        r -= pesos[i];
+        if (r < 0) return CICLO[i];
+    }
+    return OPALO_GRIS;
+}
+
+/* ------------------------------------------------------------------ */
+/* Tabla de visibilidad por etapa                                     */
 /* ------------------------------------------------------------------ */
 
 static const uint8_t VISIBILIDAD[3] = {
@@ -47,52 +133,26 @@ static const uint8_t VISIBILIDAD[3] = {
 };
 
 /* ------------------------------------------------------------------ */
-/* Tablas para el cálculo de valor                                       */
-/* ------------------------------------------------------------------ */
-
-/* Base por tipo (monedas) — sin etiqueta "Legendario", el valor emerge */
-static const uint16_t BASE_TIPO[NUM_TIPOS_OPALO] = {
-    /* NEGRO   */ 480,
-    /* CRISTAL */ 320,
-    /* FUEGO   */ 380,
-    /* BLANCO  */ 140,
-    /* ROSA    */ 200,
-    /* GRIS    */  60,
-};
-
-/* ------------------------------------------------------------------ */
-/* API pública                                                            */
+/* Ciclo de vida                                                      */
 /* ------------------------------------------------------------------ */
 
 void gema_init(Gema *g)
 {
-    g->id               = GEMA_ID_NULO;
-    g->etapa            = ETAPA_BRUTA;
-    g->tipo_real        = 0;
-    g->patron_real      = 0;
-    g->brillo_real      = 0;
-    g->pureza_real      = 0;
-    g->iridiscencia     = 0;
-    g->saturacion       = 0;
-    g->pista_color      = 0;
-    g->pista_intensidad = 0;
-    g->pista_patron     = 0;
-    g->quilates         = 0;
-    g->seed_visual      = 0;
-    g->_pad[0]          = 0;
-    g->_pad[1]          = 0;
+    g->seed     = 0;
+    g->quilates = 0;
+    g->etapa    = ETAPA_BRUTA;
+    g->flags    = 0;
 }
 
 int gema_es_valida(const Gema *g)
 {
-    return (g->id != GEMA_ID_NULO);
+    return (g->seed != 0);
 }
 
 int gema_campo_visible(const Gema *g, uint8_t campo)
 {
-    uint8_t etapa = g->etapa;
-    if (etapa > ETAPA_PULIDA) return 0;
-    return (VISIBILIDAD[etapa] & campo) != 0;
+    if (g->etapa > ETAPA_PULIDA) return 0;
+    return (VISIBILIDAD[g->etapa] & campo) != 0;
 }
 
 int gema_evolucionar(Gema *g)
@@ -103,247 +163,276 @@ int gema_evolucionar(Gema *g)
 }
 
 /* ------------------------------------------------------------------ */
-/* Valor real — usa todos los atributos internos                         */
-/* */
-/* Fórmula intencionalmente continua: no hay categorías "Legendaria".   */
-/* Dos ópalos del mismo tipo pueden valer 200 o 2000 según atributos.   */
+/* Atributos derivados                                                */
+/*                                                                    */
+/* gema_tipo() recupera el bioma desde ciudad_id — fiel a la         */
+/* distribución original, sin aproximaciones.                        */
+/* ------------------------------------------------------------------ */
+
+TipoOpalo gema_tipo(const Gema *g)
+{
+    uint8_t ciudad = gema_ciudad_id(g);
+    uint8_t bioma  = 0;
+    if (ciudad < NUM_TOTAL_CIUDADES)
+        bioma = ciudades[ciudad].bioma_id;
+    return derivar_tipo(g->seed, bioma);
+}
+
+PatronOpalo gema_patron(const Gema *g)
+{
+    uint8_t pr = slot(g->seed, 11, 255);
+    if      (pr < 128) return PATRON_NEBULA;
+    else if (pr < 192) return PATRON_VENAS;
+    else if (pr < 224) return PATRON_MATRIX;
+    else if (pr < 240) return PATRON_MOSAICO;
+    else if (pr < 252) return PATRON_CHAOS;
+    else               return PATRON_HARLEQUIN;
+}
+
+uint8_t gema_brillo(const Gema *g)
+{
+    uint8_t v = slot(g->seed, 12, 16);
+    return (uint8_t)(16 + (v * v / 15));
+}
+
+uint8_t gema_saturacion(const Gema *g)
+{
+    uint8_t v = slot(g->seed, 13, 16);
+    return (uint8_t)(16 + (v * v / 15));
+}
+
+uint8_t gema_iridiscencia(const Gema *g)
+{
+    uint8_t v = slot(g->seed, 14, 16);
+    return (uint8_t)(16 + (v * v / 15));
+}
+
+uint8_t gema_pureza(const Gema *g)
+{
+    uint32_t p = hash32((g->seed & 0xFFFFu) ^ ((uint32_t)15 * 0x9e3779b9u)) & 1023u;
+    if      (p < 500) return (uint8_t)(40 + (p % 20));
+    else if (p < 850) return (uint8_t)(60 + (p % 25));
+    else if (p < 980) return (uint8_t)(85 + (p % 10));
+    else              return (uint8_t)(95 + (p % 6));
+}
+
+/* ------------------------------------------------------------------ */
+/* Pistas — ruidosas por diseño                                       */
+/* ------------------------------------------------------------------ */
+
+uint8_t gema_pista_color(const Gema *g)
+{
+    uint8_t ruido = slot(g->seed, 20, 3);
+    if (ruido == 0)
+        return (uint8_t)gema_tipo(g);
+    return (uint8_t)(((uint8_t)gema_tipo(g) + ruido) % NUM_TIPOS_OPALO);
+}
+
+uint8_t gema_pista_patron(const Gema *g)
+{
+    return slot(g->seed, 21, 6);
+}
+
+uint8_t gema_pista_intensidad(const Gema *g)
+{
+    return (uint8_t)(1 + slot(g->seed, 22, 4));
+}
+
+/* ------------------------------------------------------------------ */
+/* Economía                                                           */
 /* ------------------------------------------------------------------ */
 
 uint32_t gema_valor_real(const Gema *g)
 {
+    if (!gema_es_valida(g))      return 0;
     if (g->etapa < ETAPA_PULIDA) return 0;
-    if (g->tipo_real >= NUM_TIPOS_OPALO) return 0;
 
-    uint32_t base  = BASE_TIPO[g->tipo_real];
+    TipoOpalo   tipo   = gema_tipo(g);
+    PatronOpalo patron = gema_patron(g);
+    if ((uint8_t)tipo >= NUM_TIPOS_OPALO) return 0;
 
-    /* Bonus multiplicativos desde atributos */
-    uint32_t brillo_bonus      = (uint32_t)g->brillo_real * 3u;
-    uint32_t pureza_bonus      = (uint32_t)g->pureza_real * 4u;
-    uint32_t irid_bonus        = (uint32_t)g->iridiscencia * 2u;
-    uint32_t sat_bonus         = (uint32_t)g->saturacion;
-    uint32_t quilates_bonus    = (uint32_t)g->quilates / 8u;
+    /* Precio base por quilate segun tipo */
+    static const uint16_t PRECIO_QUILATE[NUM_TIPOS_OPALO] = {
+        /* NEGRO   */ 48,
+        /* CRISTAL */ 32,
+        /* FUEGO   */ 38,
+        /* BLANCO  */ 14,
+        /* ROSA    */ 20,
+        /* GRIS    */  6,
+    };
 
-    /* Bonus por patrón raro */
-    uint32_t patron_bonus = 0;
-    if (g->patron_real == PATRON_HARLEQUIN) patron_bonus = 300;
-    else if (g->patron_real == PATRON_MOSAICO) patron_bonus = 100;
+    /* Multiplicador de patron x10 (NEBULA=x1.0, HARLEQUIN=x3.0) */
+    static const uint8_t MULT_PATRON[6] = {
+        /* NEBULA    */ 10,
+        /* VENAS     */ 12,
+        /* MATRIX    */ 14,
+        /* MOSAICO   */ 18,
+        /* CHAOS     */ 22,
+        /* HARLEQUIN */ 30,
+    };
 
-    return base
-         + brillo_bonus
-         + pureza_bonus
-         + irid_bonus
-         + sat_bonus
-         + quilates_bonus
-         + patron_bonus;
+    uint32_t precio_q = PRECIO_QUILATE[(uint8_t)tipo];
+    uint32_t mult     = MULT_PATRON[(uint8_t)patron];
+
+    /* FIX: cap de quilates para evitar desbordamiento uint32_t.
+     * Sin cap: 48 * 30 * 20020^2 / 100 desborda ampliamente.
+     * Con cap 1000: valor máximo = 48 * 30 * 1000 * 1000 / 100
+     *             = 14.400.000, bien dentro de uint32_t. */
+    uint32_t q = g->quilates;
+    if (q > 1000u) q = 1000u;
+
+    /* Dividir antes de la segunda multiplicación para evitar overflow:
+     * precio_q * mult <= 48 * 30 = 1440
+     * 1440 * 1000 = 1.440.000  (seguro)
+     * 1.440.000 * 1000 / 100 = 14.400.000 (seguro) */
+    uint32_t valor = precio_q * mult * q / 10u * q / 10u;
+
+    /* Bonus de atributos -- complemento fino, no protagonista */
+    uint32_t bonus = 0;
+    bonus += (uint32_t)gema_brillo(g)      * 2u;
+    bonus += (uint32_t)gema_pureza(g)      * 3u;
+    bonus += (uint32_t)gema_iridiscencia(g);
+    bonus += (uint32_t)gema_saturacion(g);
+
+    return valor + bonus;
 }
-
-/* ------------------------------------------------------------------ */
-/* Valor estimado — solo usa lo visible en la etapa actual               */
-/* */
-/* Esta es la clave del mercado: el comerciante no conoce el real.       */
-/* En BRUTA: la estimación es solo una señal ruidosa de las grietas.     */
-/* En CORTADA: mejora, pero sigue siendo parcial.                       */
-/* En PULIDA: coincide con gema_valor_real().                           */
-/* ------------------------------------------------------------------ */
 
 uint32_t gema_valor_estimado(const Gema *g)
 {
     if (!gema_es_valida(g)) return 0;
 
-    if (g->etapa >= ETAPA_PULIDA) {
+    if (g->etapa >= ETAPA_PULIDA)
         return gema_valor_real(g);
-    }
 
     if (g->etapa == ETAPA_CORTADA) {
-        /* Se conoce brillo y patrón aproximado */
         uint32_t est = 100u;
-        est += (uint32_t)g->brillo_real * 2u;   /* brillo visible */
-        uint32_t patron_bonus = 0;
-        if (g->patron_real == PATRON_HARLEQUIN) patron_bonus = 150;
-        else if (g->patron_real == PATRON_MOSAICO) patron_bonus = 50;
-        est += patron_bonus;
+        est += (uint32_t)gema_brillo(g) * 2u;
+        PatronOpalo patron = gema_patron(g);
+        if      (patron == PATRON_HARLEQUIN) est += 150;
+        else if (patron == PATRON_MOSAICO)   est += 50;
         est += (uint32_t)g->quilates / 12u;
         return est;
     }
 
-    /* ETAPA_BRUTA: solo pistas de grietas */
-    /* pista_intensidad es la única señal cuantitativa */
-    uint32_t est = 40u + (uint32_t)g->pista_intensidad / 4u;
+    /* ETAPA_BRUTA: estimacion muy vaga basada en quilates y pista.
+     * FIX: cap para evitar desbordamiento con quilates de jackpot.
+     * Sin cap: 20020^2 / 50 = ~8.016.008 (pasa, pero rozando)
+     * Con cap garantizamos que nunca desborda. */
+    uint32_t q = g->quilates;
+    if (q > 1000u) q = 1000u;
 
-    /* El color de la grieta da una pista muy vaga del tipo */
-    if (g->pista_color < NUM_TIPOS_OPALO) {
-        est += BASE_TIPO[g->pista_color] / 8u;
-    }
-
+    uint32_t est = 40u;
+    est += (uint32_t)gema_pista_intensidad(g) * 10u;
+    est += q * q / 50u;
     return est;
 }
 
 /* ------------------------------------------------------------------ */
-/* crear_gema_desde_chunk                                               */
-/* */
-/* ÚNICA función que lee la seed del chunk.                             */
-/* El ID viene de save.proximo_id — el llamador lo incrementa allí.     */
-/* El bioma viene de la ciudad/región actual.                           */
+/* crear_gema_desde_chunk                                             */
+/*                                                                    */
+/* Construye la seed empaquetada:                                     */
+/*   bits 31-24 → ciudad_id  (del chunk)                             */
+/*   bits 23-16 → dia_actual (del estado de juego)                   */
+/*   bits 15- 0 → hash de chunk->seed, truncado a 16 bits            */
+/*                                                                    */
+/* La parte rand mezcla la seed del chunk con ciudad_id para que     */
+/* dos chunks idénticos en ciudades distintas den ópalos distintos.  */
 /* ------------------------------------------------------------------ */
 
 void crear_gema_desde_chunk(Gema *g, const Chunk *chunk,
-                            uint32_t id, uint8_t bioma)
+                             uint8_t ciudad_id, uint8_t dia_actual)
 {
-    uint32_t seed = chunk->seed;
+    uint16_t rand_part = (uint16_t)(
+        hash32(chunk->seed ^ ((uint32_t)ciudad_id * 0x9e3779b9u)) & 0xFFFFu
+    );
 
-    /* --- Identidad ------------------------------------------------ */
-    g->id    = id;
-    g->etapa = ETAPA_BRUTA;
+    /* seed 0 no es válida — forzar al menos rand_part = 1 */
+    if (rand_part == 0 && ciudad_id == 0 && dia_actual == 0)
+        rand_part = 1;
 
-    /* seed_visual: independiente de los atributos económicos */
-    g->seed_visual = hash32(seed ^ 0xDEADBEEFu);
+    g->seed  = ((uint32_t)ciudad_id  << 24)
+             | ((uint32_t)dia_actual << 16)
+             | (uint32_t)rand_part;
 
-    /* --- Quilates: heredados del chunk con pequeña variación ------- */
-    {
-        uint16_t var = rango_seed(seed, 0, 30);
-        g->quilates  = chunk->quilates + var;
-    }
+    g->etapa    = ETAPA_BRUTA;
+    g->flags    = 0;
 
-    /* --- Atributos reales: reutilizar la lógica de generar_opalo -- */
-    /* En lugar de duplicar la distribución por bioma, generamos un   */
-    /* Opalo temporal solo para extraer sus atributos y descartarlo.   */
-    {
-        calcular_atributos_gema(g, seed, bioma);
-    }
-
-    /* --- Pistas visibles en etapa bruta --------------------------- */
-    /* Derivan de la seed pero son intencionalmente ruidosas:          */
-    /* no revelan el tipo real, solo dan una señal especulativa.       */
-    g->pista_intensidad = chunk->intensidad_grieta;
-    g->pista_patron     = rango_seed(seed, 5, 6);   /* patrón aproximado */
-
-    /* El color de la grieta puede ser el tipo real, o uno adyacente  */
-    {
-        uint8_t ruido = rango_seed(seed, 6, 3);  /* 0, 1 o 2 */
-        if (ruido == 0) {
-            g->pista_color = g->tipo_real;
-        } else {
-            /* color desplazado — el jugador no puede estar seguro */
-            g->pista_color = (g->tipo_real + ruido) % NUM_TIPOS_OPALO;
-        }
-    }
-
-    /* --- Padding a cero ------------------------------------------- */
-    g->_pad[0] = 0;
-    g->_pad[1] = 0;
+    /* Quilates: base del chunk + pequeña variación */
+    g->quilates = chunk->quilates
+                + (uint16_t)(hash32(rand_part) % 30u);
 }
 
 /* ------------------------------------------------------------------ */
-/* Serialización little-endian (compatible GBA SAV)                     */
-/* */
-/* Layout (20 bytes):                                                   */
-/* [0-3]   id                                                       */
-/* [4]     etapa                                                    */
-/* [5]     tipo_real                                                */
-/* [6]     patron_real                                              */
-/* [7]     brillo_real                                              */
-/* [8]     pureza_real                                              */
-/* [9]     iridiscencia                                             */
-/* [10]    saturacion                                               */
-/* [11]    pista_color                                              */
-/* [12]    pista_intensidad                                         */
-/* [13]    pista_patron                                             */
-/* [14-15] quilates                                                 */
-/* [16-19] seed_visual                                              */
+/* Serialización little-endian (compatible GBA SAV)                  */
+/*                                                                    */
+/* Layout (8 bytes):                                                  */
+/*   [0-3]  seed      (little-endian)                                */
+/*   [4-5]  quilates  (little-endian)                                */
+/*   [6]    etapa                                                     */
+/*   [7]    flags                                                     */
 /* ------------------------------------------------------------------ */
 
 int gema_serializar(const Gema *g, uint8_t *buf)
 {
-    buf[0]  = (uint8_t)(g->id & 0xFF);
-    buf[1]  = (uint8_t)((g->id >>  8) & 0xFF);
-    buf[2]  = (uint8_t)((g->id >> 16) & 0xFF);
-    buf[3]  = (uint8_t)((g->id >> 24) & 0xFF);
-    buf[4]  = g->etapa;
-    buf[5]  = g->tipo_real;
-    buf[6]  = g->patron_real;
-    buf[7]  = g->brillo_real;
-    buf[8]  = g->pureza_real;
-    buf[9]  = g->iridiscencia;
-    buf[10] = g->saturacion;
-    buf[11] = g->pista_color;
-    buf[12] = g->pista_intensidad;
-    buf[13] = g->pista_patron;
-    buf[14] = (uint8_t)(g->quilates & 0xFF);
-    buf[15] = (uint8_t)((g->quilates >> 8) & 0xFF);
-    buf[16] = (uint8_t)(g->seed_visual & 0xFF);
-    buf[17] = (uint8_t)((g->seed_visual >>  8) & 0xFF);
-    buf[18] = (uint8_t)((g->seed_visual >> 16) & 0xFF);
-    buf[19] = (uint8_t)((g->seed_visual >> 24) & 0xFF);
-    return 20;
+    buf[0] = (uint8_t)( g->seed        & 0xFF);
+    buf[1] = (uint8_t)((g->seed >>  8) & 0xFF);
+    buf[2] = (uint8_t)((g->seed >> 16) & 0xFF);
+    buf[3] = (uint8_t)((g->seed >> 24) & 0xFF);
+    buf[4] = (uint8_t)( g->quilates        & 0xFF);
+    buf[5] = (uint8_t)((g->quilates >>  8) & 0xFF);
+    buf[6] = g->etapa;
+    buf[7] = g->flags;
+    return 8;
 }
 
 int gema_deserializar(Gema *g, const uint8_t *buf)
 {
-    g->id = (uint32_t)buf[0]
-          | ((uint32_t)buf[1] <<  8)
-          | ((uint32_t)buf[2] << 16)
-          | ((uint32_t)buf[3] << 24);
+    g->seed = (uint32_t)buf[0]
+            | ((uint32_t)buf[1] <<  8)
+            | ((uint32_t)buf[2] << 16)
+            | ((uint32_t)buf[3] << 24);
 
-    g->etapa = buf[4];
+    g->quilates = (uint16_t)buf[4]
+                | ((uint16_t)buf[5] << 8);
+
+    g->etapa = buf[6];
+    g->flags = buf[7];
+
     if (g->etapa > ETAPA_PULIDA) return 0;
-
-    g->tipo_real        = buf[5];
-    g->patron_real      = buf[6];
-    g->brillo_real      = buf[7];
-    g->pureza_real      = buf[8];
-    g->iridiscencia     = buf[9];
-    g->saturacion       = buf[10];
-    g->pista_color      = buf[11];
-    g->pista_intensidad = buf[12];
-    g->pista_patron     = buf[13];
-    g->quilates  = (uint16_t)buf[14] | ((uint16_t)buf[15] << 8);
-    g->seed_visual = (uint32_t)buf[16]
-                   | ((uint32_t)buf[17] <<  8)
-                   | ((uint32_t)buf[18] << 16)
-                   | ((uint32_t)buf[19] << 24);
-
-    g->_pad[0] = 0;
-    g->_pad[1] = 0;
-
-    if (g->tipo_real   >= NUM_TIPOS_OPALO) return 0;
-    if (g->etapa       >  ETAPA_PULIDA)    return 0;
+    if (g->seed  == 0)           return 0;
 
     return 1;
 }
 
 /* ------------------------------------------------------------------ */
-/* Funciones Puente: Opalo <-> Gema                                   */
+/* Conversión temporal Opalo <-> Gema                                */
 /* ------------------------------------------------------------------ */
 
 void opalo_to_gema(const Opalo *o, Gema *g)
 {
     gema_init(g);
-
-    g->id           = GEMA_ID_NULO; /* Se inicializa huérfano de ID en el motor visual */
-    g->etapa        = ETAPA_PULIDA; /* Un ópalo consolidado asume etapa completa descubierta */
-    g->tipo_real    = (uint8_t)o->tipo;
-    g->patron_real  = (uint8_t)o->patron;
-    g->brillo_real  = o->brillo;
-    g->pureza_real  = o->pureza;
-    g->iridiscencia = o->iridiscencia;
-    g->saturacion   = o->saturacion;
-    g->quilates     = o->quilates;
-    g->seed_visual  = o->seed;
-    
-    /* El color_offset del ópalo se mapea a pista_color para el motor de plasma */
-    g->pista_color  = o->color_offset;
+    /*
+     * Un Opalo no tiene ciudad_id ni dia — se pierden al convertir.
+     * Se rellena con ciudad 0, dia 0, y la seed del opalo como rand.
+     * Suficiente para renderizado; no apto para ficha técnica real.
+     */
+    uint16_t rand_part = (uint16_t)(o->seed & 0xFFFFu);
+    if (rand_part == 0) rand_part = 1;
+    g->seed     = (uint32_t)rand_part;   /* ciudad=0, dia=0, rand=seed */
+    g->quilates = o->quilates;
+    g->etapa    = ETAPA_PULIDA;
+    g->flags    = 0;
 }
 
 void gema_a_opalo_temp(Opalo *o, const Gema *g)
 {
-    o->tipo         = (TipoOpalo)g->tipo_real;
-    o->patron       = (PatronOpalo)g->patron_real;
-    o->brillo       = g->brillo_real;
-    o->pureza       = g->pureza_real;
-    o->iridiscencia = g->iridiscencia;
-    o->saturacion   = g->saturacion;
+    o->tipo         = gema_tipo(g);
+    o->patron       = gema_patron(g);
+    o->brillo       = gema_brillo(g);
+    o->pureza       = gema_pureza(g);
+    o->iridiscencia = gema_iridiscencia(g);
+    o->saturacion   = gema_saturacion(g);
     o->quilates     = g->quilates;
-    o->seed         = g->seed_visual;
-    /* color_offset: byte bajo de seed_visual, igual que en generar_opalo */
-    o->color_offset = (uint8_t)(g->seed_visual & 0xFF);
+    o->seed         = g->seed;
+    o->color_offset = (uint8_t)(g->seed & 0xFF);
 }

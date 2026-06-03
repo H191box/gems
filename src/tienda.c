@@ -1,5 +1,4 @@
 #include "tienda.h"
-#include "taller.h"
 #include <stdio.h>
 #include <gba_video.h>
 #include <gba_input.h>
@@ -20,7 +19,7 @@ static void dibujar_tienda(void) {
     clear(vram, 0);
 
     rect(vram, 0, 0, 240, 16, 4);
-    draw_text(vram, 5, 4, "TIENDA", 255);
+    draw_text(vram, 5, 4, "TIENDA DE SOBRES", 255);
 
     char buf[32];
     sprintf(buf, "ORO: %d", obtener_dinero());
@@ -34,11 +33,18 @@ static void dibujar_tienda(void) {
     }
 
     int x_desc = LIST_W + 10;
-    sprintf(buf, "CANT: %d", SACOS[cursor].cantidad_chunks);
+    // Adaptación a terminología de contenido de sobres
+    sprintf(buf, "CONTIENE: %d GEMAS", SACOS[cursor].cantidad_chunks);
     draw_text(vram, x_desc, 30, buf, 255);
-    sprintf(buf, "PRECIO: %d", SACOS[cursor].precio);
+    sprintf(buf, "PRECIO: %d ORO", SACOS[cursor].precio);
     draw_text(vram, x_desc, 50, buf, 255);
-    draw_text(vram, x_desc, 100, "A: COMPRAR", 255);
+
+    // Mostramos visualmente la edición según el bioma actual
+    extern uint8_t ciudad_actual_idx;
+    sprintf(buf, "EDICION: BIOMA %d", ciudad_actual_idx);
+    draw_text(vram, x_desc, 80, buf, 240); // Color diferenciado
+    
+    draw_text(vram, x_desc, 110, "A: COMPRAR Y ABRIR", 255);
     draw_text(vram, 0, 152, "ARR/ABA:MOVER  START:MENU", 255);
 
     flip();
@@ -65,7 +71,7 @@ void tienda_input(uint16_t keys) {
     if (keys & KEY_A) {
         if (obtener_dinero() >= SACOS[cursor].precio) {
             comprar_saco(cursor);
-            taller_recargar();
+            // ELIMINADO: taller_recargar() ya no existe ni es necesario
             dibujar_tienda();
         }
     }

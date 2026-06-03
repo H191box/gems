@@ -27,6 +27,11 @@ typedef enum {
     PATRON_HARLEQUIN
 } PatronOpalo;
 
+/* * Estructura temporal. 
+ * Se usa para renderizar en pantalla (plasma.c) o mostrar 
+ * estadísticas en la UI. Se rellena al vuelo leyendo la seed de una Gema.
+ * NUNCA se guarda en SRAM.
+ */
 typedef struct {
     uint32_t seed;
     TipoOpalo tipo;
@@ -39,6 +44,8 @@ typedef struct {
     uint8_t color_offset;
 } Opalo;
 
+/* * Estructura para la fase de taller/corte. 
+ */
 typedef struct {
     uint32_t seed;
     uint16_t quilates;
@@ -56,13 +63,10 @@ typedef struct {
 
 /* --- Prototipos de Funciones --- */
 
-// Generación de ópalos y atributos
+// Generación temporal de ópalos para caché visual y UI
 void generar_opalo(Opalo* o, uint32_t seed);
-void calcular_atributos_gema(Gema* g, uint32_t seed, uint8_t bioma);
 
-// Gestión de chunks
+// Gestión y generación del material en bruto para el taller
 void generar_chunk(Chunk* c, uint32_t seed);
-void aplicar_bonus_region(Opalo* o, Chunk* c);
-uint32_t calcular_valor_opalo(const Opalo* o);
 
 #endif // OPALO_H

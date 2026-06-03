@@ -32,8 +32,7 @@ static uint8_t pixel_matrix(int x, int y, uint8_t off, const Gema* g) {
     int p2 = (lut_s((x * 2 + y + off) >> 4) + lut_c((y * 2 - x + off) >> 4) + 128) & 255;
     int mancha = (p1 + p2) >> 1;
 
-    // Ajustado para usar el campo correcto: iridiscencia
-    int umbral = 80 + (g->iridiscencia >> 1); 
+    int umbral = 80 + (gema_iridiscencia(g) >> 1);
     if (umbral > 200) umbral = 200;
 
     if (mancha > umbral) {
@@ -53,8 +52,7 @@ static uint8_t pixel_matrix(int x, int y, uint8_t off, const Gema* g) {
 /* ---------------- PÚBLICAS ---------------- */
 
 uint8_t plasma_pixel(int x, int y, uint8_t off, const Gema* g) {
-    // Ajustado para usar el campo correcto: patron_real
-    switch (g->patron_real) {
+    switch (gema_patron(g)) {
         case PATRON_VENAS:     return pixel_venas(x, y, off);
         case PATRON_MOSAICO:   return pixel_mosaico(x, y, off);
         case PATRON_CHAOS:     return pixel_chaos(x, y, off);

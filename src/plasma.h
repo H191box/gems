@@ -7,7 +7,7 @@
 /* * El plasma ahora utiliza los patrones y propiedades definidas en la estructura Gema
  * para renderizar píxeles específicos basados en el tipo de ópalo.
  */
-
+uint8_t pixel_nebula(int x, int y, uint8_t off);
 // Ahora estas funciones reciben el puntero a Gema para acceder a los patrones
 uint8_t plasma_pixel(int x, int y, uint8_t off, const Gema* g);
 uint8_t plasma_pixel_smooth(int x, int y, uint8_t off, const Gema* g);

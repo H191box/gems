@@ -13,7 +13,7 @@
 
 extern EstadoJuego estado;
 extern int pos_x, pos_y;
-extern int ciudad_actual_idx;
+extern uint8_t ciudad_actual_idx;
 
 typedef enum { VISTA_MAPA, VISTA_CONFIRMAR } VistaViaje;
 static VistaViaje vista;
@@ -56,7 +56,7 @@ static void render_viaje(void) {
         draw_text(vram, 10, 27 + (i * 30), linea, 255);
     }
 
-    // DERECHA: Descripción de la ciudad seleccionada (si existe)
+    // DERECHA: Descripción de la ciudad seleccionada
     int idx_sel = adj[cursor];
     if (idx_sel != -1) {
         draw_text(vram, 120, 20, (char*)ciudades[idx_sel].nombre, 255);
@@ -87,7 +87,6 @@ void viajar_input(uint16_t keys) {
         if (keys & KEY_UP)    cursor = (cursor == 0) ? 3 : cursor - 1;
         if (keys & KEY_DOWN)  cursor = (cursor == 3) ? 0 : cursor + 1;
         
-        // --- NUEVO: Salir al menú principal con B ---
         if (keys & KEY_B) {
             volver_menu_con_fade(); 
             return;
@@ -100,12 +99,10 @@ void viajar_input(uint16_t keys) {
                 get_ciudad_en_pos(pos_x + 1, pos_y),
                 get_ciudad_en_pos(pos_x - 1, pos_y)
             };
-            // Solo permitir confirmar si hay ciudad
             if (adj[cursor] != -1) vista = VISTA_CONFIRMAR;
         }
         render_viaje();
     } else {
-        // En VISTA_CONFIRMAR: A confirma viaje, B vuelve a la vista de mapa
         if (keys & KEY_A) {
             int adj[4] = {
                 get_ciudad_en_pos(pos_x, pos_y - 1),
@@ -123,7 +120,12 @@ void viajar_input(uint16_t keys) {
                 ciudad_actual_idx = idx;
                 
                 avanzar_tiempo();
+                
+                // SINCRONIZACIÓN CRÍTICA:
+                // Guardamos el estado actual del mundo en la SRAM
+                // para que la galería no pierda los datos al recargar.
                 sync_save_world_state();
+                
                 volver_menu_con_fade(); 
                 return;
             }
