@@ -19,9 +19,17 @@ uint16_t* get_vram(void) {
     return page ? BACK : FRONT;
 }
 
-void flip(void) {
+// Espera VBlank sin hacer page swap.
+// Usar antes de escribir paleta o hacer flip_no_vsync().
+void vsync_only(void) {
     while (REG_VCOUNT >= 160);
     while (REG_VCOUNT < 160);
+}
+
+// Page swap sin vsync propio.
+// Llamar SIEMPRE después de vsync_only() para que el swap
+// ocurra en el VBlank y no a mitad de frame.
+void flip_no_vsync(void) {
     if (page) {
         REG_DISPCNT |=  BACKBUFFER;
         page = 0;
@@ -29,6 +37,14 @@ void flip(void) {
         REG_DISPCNT &= ~BACKBUFFER;
         page = 1;
     }
+}
+
+// vsync + page swap atómico. Equivalente al flip() original.
+// Mantener para compatibilidad con código que no necesita
+// escribir paleta entre el vsync y el swap.
+void flip(void) {
+    vsync_only();
+    flip_no_vsync();
 }
 
 // --------------------------------------------------
@@ -70,14 +86,11 @@ void clear(uint16_t* vram, uint8_t color) {
         vram[i] = packed;
 }
 
-
-// Añade esto en video.c
 void clear_vram_con_color(uint16_t* vram, uint8_t color) {
     uint16_t packed = ((uint16_t)color << 8) | color;
     for (int i = 0; i < 19200; i++)
         vram[i] = packed;
 }
-
 
 // --------------------------------------------------
 // Helpers internos
@@ -129,6 +142,7 @@ void fade_out(void) {
         BACK[i]  = 0;
     }
 }
+
 void fade_in(void) {
     uint16_t pal_target[PAL_SIZE];
     for (int i = 0; i < PAL_SIZE; i++)
@@ -160,6 +174,3 @@ void fade_in(void) {
     for (int i = 0; i < PAL_SIZE; i++)
         PAL_BG[i] = pal_target[i];
 }
-
-
-

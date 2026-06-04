@@ -6,17 +6,24 @@
 #include "render.h"
 #include "gema_render.h"
 #include "gema.h"
-#include "video.h"  // Corrección: Evita la declaración implícita de get_vram
+#include "video.h"
+
+// Índices globales reservados en la Paleta RAM para el fondo texturizado
+#define IDX_FONDO_OSCURO  5
+#define IDX_FONDO_CLARO   6
 
 // Buffer para el patrón de dithering en EWRAM
-static uint16_t fondo_lineas[16][120]; 
+static uint16_t fondo_lineas[16][120];
 static uint16_t linea_tmp[120];
+
+// Referencia externa al buffer único asignado en gema_render.c
+extern uint8_t grieta_buf[160][240];
 
 // Matriz de Bayer 4x4 para el Dithering ordenado
 const uint8_t bayer4x4[4][4] = {
     { 0,  8,  2, 10},
     {12,  4, 14,  6},
-    { 3, 11,  1,  9},                
+    { 3, 11,  1,  9},
     {15,  7, 13,  5}
 };
 
@@ -31,14 +38,14 @@ static uint32_t rng_next(uint32_t* s) {
 /* --- OPTIMIZACIÓN ARM7TDMI: Eliminados los int64_t por software --- */
 static void plot_grieta_pixel(int px, int py, int halo, int cx, int cy, int ra2, int rb2) {
     if (px < 0 || px >= 240 || py < 0 || py >= 160) return;
-    
+
     int dx = px - cx;
     int dy = py - cy;
-    
+
     if (dx*dx * rb2 + dy*dy * ra2 > ra2 * rb2) return;
-    
+
     if (grieta_buf[py][px] < 0x01) grieta_buf[py][px] = 0x01;
-    
+
     if (halo >= 1) {
         const int offs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
         for (int k = 0; k < 4; k++) {
@@ -77,7 +84,7 @@ void precalcular_grietas(uint32_t seed, uint8_t num_grietas, int cx, int cy, int
 
     int ra2 = ra * ra;
     int rb2 = rb * rb;
-    
+
     uint32_t s_init = seed;
     int tamanyo = (rng_next(&s_init) % 3) + 1;
     int forma_grieta = rng_next(&s_init) & 3;
@@ -93,7 +100,7 @@ void precalcular_grietas(uint32_t seed, uint8_t num_grietas, int cx, int cy, int
             int ty = cy + (int)(rng_next(&s) % (rb * 2 + 1)) - rb;
             int ddx = tx - cx, ddy = ty - cy;
             if (ddx*ddx * rb2 + ddy*ddy * ra2 <= ra2 * rb2) {
-                ox = tx; oy = ty; 
+                ox = tx; oy = ty;
                 break;
             }
         }
@@ -266,7 +273,7 @@ void generar_paleta(Opalo* o) {
             break;
     }
     pal[254] = (hl_r & 31) | ((hl_g & 31) << 5) | ((hl_b & 31) << 10);
-    pal[255] = 0x4210; 
+    pal[255] = 0x4210; // Texto / Sombras oscuras (Marrón muy oscuro / Antracita)
 }
 
 /* ---------------- VOLCADOS DE BUFFER ---------------- */
@@ -306,7 +313,9 @@ void volcar_buf_solo_opalo(const uint8_t* buf, int offset) {
     }
 }
 
-// Volcado crítico optimizado por línea en sección IWRAM
+// Volcado crítico optimizado por línea en sección IWRAM.
+// PRECONDICIÓN: llamar siempre con el back buffer como destino,
+// nunca durante el barrido del LCD (garantizado por el vsync en galeria.c).
 void __attribute__((section(".iwram"), long_call)) volcar_frame(const uint8_t* buf_opalo, int offset, int offset_bg) {
     uint16_t* vram = get_vram();
     for (int y = 0; y < 160; y++) {
@@ -315,45 +324,61 @@ void __attribute__((section(".iwram"), long_call)) volcar_frame(const uint8_t* b
             uint16_t fondo_word = fondo_lineas[y & 15][x];
             uint8_t c0 = fondo_word & 0xFF;
             uint8_t c1 = fondo_word >> 8;
-            
+
             int sx0 = (x * 2)     - offset;
             int sx1 = (x * 2 + 1) - offset;
-            
+
             if (sx0 >= 0 && sx0 < 240 && row[sx0] != 0) c0 = row[sx0];
             if (sx1 >= 0 && sx1 < 240 && row[sx1] != 0) c1 = row[sx1];
-            
+
             linea_tmp[x] = (uint16_t)c0 | ((uint16_t)c1 << 8);
         }
-        REG_DMA3SAD = (uint32_t)linea_tmp;   // CORRECCIÓN: REG_ en lugar de MEM_
+        REG_DMA3SAD = (uint32_t)linea_tmp;
         REG_DMA3DAD = (uint32_t)(vram + y * 120);
         REG_DMA3CNT = 0x80000000 | 120;
     }
 }
 
-void precalcular_fondo(int offset_bg) {
-    const uint8_t IDX_FONDO_OSCURO = 5; 
-    const uint8_t IDX_FONDO_CLARO  = 6;
+/* ---------------- GESTIÓN DE FONDO TEXTURIZADO BEIGE ---------------- */
 
+void inicializar_paleta_fondo_beige(void) {
+    uint16_t* pal = (uint16_t*)0x05000000;
+    uint16_t beige_claro  = 30 | (29 << 5) | (25 << 10);
+    uint16_t beige_oscuro = 27 | (25 << 5) | (21 << 10);
+
+    // Forzamos el índice 0 (color de caída/backdrop de la GBA) al beige oscuro
+    // para evitar destellos o bordes negros estructurales del hardware.
+    pal[0]                = beige_oscuro;
+    pal[IDX_FONDO_CLARO]  = beige_claro;
+    pal[IDX_FONDO_OSCURO] = beige_oscuro;
+}
+
+// Precalcula el patrón de dithering en fondo_lineas[].
+// Dithering ordenado simple: matriz Bayer 4x4 con umbral fijo.
+// Sin desplazamientos diagonales — resultado uniforme y regular.
+void precalcular_fondo(int offset_bg) {
     for (int y = 0; y < 16; y++) {
         for (int x = 0; x < 120; x++) {
             int px0 = x * 2;
             int px1 = x * 2 + 1;
 
-            int intensidad0 = ((px0 + offset_bg) / 8) % 16; 
-            int intensidad1 = ((px1 + offset_bg) / 8) % 16; 
-
-            uint8_t c0 = (intensidad0 > bayer4x4[y % 4][px0 % 4]) ? IDX_FONDO_CLARO : IDX_FONDO_OSCURO;
-            uint8_t c1 = (intensidad1 > bayer4x4[y % 4][px1 % 4]) ? IDX_FONDO_CLARO : IDX_FONDO_OSCURO;
+            /* Umbral fijo en 7 (mitad de la matriz Bayer 0-15).
+             * Produce un patrón de tablero regular sin estructuras
+             * en rombo ni diagonales visibles.                    */
+            uint8_t c0 = (bayer4x4[y % 4][px0 % 4] < 7) ? IDX_FONDO_OSCURO : IDX_FONDO_CLARO;
+            uint8_t c1 = (bayer4x4[y % 4][px1 % 4] < 7) ? IDX_FONDO_OSCURO : IDX_FONDO_CLARO;
 
             fondo_lineas[y][x] = c0 | (c1 << 8);
         }
     }
 }
 
+// Vuelca el fondo precalculado a VRAM por DMA.
+// Llamar ANTES del vsync, sobre el back buffer.
 void dibujar_fondo_texturizado_optimizado(uint16_t* vram, int offset_bg) {
     precalcular_fondo(offset_bg);
     for (int y = 0; y < 160; y++) {
-        REG_DMA3SAD = (uint32_t)fondo_lineas[y & 15]; // CORRECCIÓN: REG_ en lugar de MEM_
+        REG_DMA3SAD = (uint32_t)fondo_lineas[y & 15];
         REG_DMA3DAD = (uint32_t)(vram + y * 120);
         REG_DMA3CNT = 0x80000000 | 120;
     }
@@ -364,6 +389,7 @@ void renderizar_frame_completo(const uint8_t* buf_opalo, int offset_opalo, int o
     volcar_frame(buf_opalo, offset_opalo, offset_bg);
 }
 
+// vsync standalone para código que no usa flip() directamente.
 void vsync(void) {
     while (REG_VCOUNT >= 160);
     while (REG_VCOUNT < 160);
@@ -371,12 +397,6 @@ void vsync(void) {
 
 void draw_ui_sobre_buffer(const char* nombre) {
     uint16_t* vram = get_vram();
-    for (int x = 0; x < 120; x++) {
-        vram[x]           = 0;
-        vram[120+x]       = 0;
-        vram[19080+x]     = 0;
-        vram[19200-120+x] = 0;
-    }
     draw_text(vram, 2, 2,   (char*)nombre,              255);
     draw_text(vram, 2, 150, "B:VOLVER  IZQ/DER:CAMBIAR",  255);
 }

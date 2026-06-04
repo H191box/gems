@@ -3,18 +3,8 @@
  * Entidad persistente Gema — Gacha de Ópalos GBA
  *
  * FILOSOFÍA:
- *   La Gema almacena únicamente información persistente.
- *   Todo atributo visual y comercial se deriva dinámicamente desde seed.
- *
- * LAYOUT DE SEED (32 bits):
- *
- *   [ 31..24 ] ciudad_id  — 8 bits, hasta 255 ciudades
- *   [ 23..16 ] dia        — 8 bits, día absoluto de juego (0-255)
- *   [ 15.. 0 ] rand       — 16 bits de entropía visual
- *
- *   La parte rand se genera aleatoriamente en crear_gema_desde_chunk().
- *   ciudad_id y dia se leen directamente desde la seed — no se almacenan
- *   por separado.
+ * El precio por quilate se determina mediante atributos de fase y rareza,
+ * y posteriormente se somete a un multiplicador exponencial basado en los quilates.
  *
  * TAMAÑO: 8 bytes exactos.
  */
@@ -29,9 +19,9 @@
 /* Etapas de evolución                                                */
 /* ------------------------------------------------------------------ */
 
-#define ETAPA_BRUTA    0
-#define ETAPA_CORTADA  1
-#define ETAPA_PULIDA   2
+#define ETAPA_BRUTA    0  /* Fase 1: Bruto */
+#define ETAPA_CORTADA  1  /* Fase 2: Cabujón */
+#define ETAPA_PULIDA   2  /* Fase 3: Pulido */
 
 /* ------------------------------------------------------------------ */
 /* Máscaras de campo visible                                          */
@@ -44,19 +34,15 @@
 #define CAMPO_VALOR    0x10
 
 /* ------------------------------------------------------------------ */
-/* Flags persistentes (bits 0-1 del byte flags)                      */
+/* Flags persistentes (Empaquetados en 1 byte)                        */
 /* ------------------------------------------------------------------ */
 
 #define GEMA_FLAG_FAVORITA   0x01
 #define GEMA_FLAG_BLOQUEADA  0x02
+#define GEMA_FLAG_GRIETAS    0x04  /* Excepción: Almacena de forma persistente el Fallo Crítico */
 
 /* ------------------------------------------------------------------ */
-/* Estructura persistente — 8 bytes                                  */
-/*                                                                    */
-/*   seed      4   [ ciudad_id(8) | dia(8) | rand(16) ]              */
-/*   quilates  2                                                      */
-/*   etapa     1                                                      */
-/*   flags     1                                                      */
+/* Estructuras de Datos                                               */
 /* ------------------------------------------------------------------ */
 
 typedef struct Gema {
@@ -66,16 +52,32 @@ typedef struct Gema {
     uint8_t  flags;
 } Gema;
 
+typedef struct {
+    /* ATRIBUTOS REALES (Inmutables, potencial máximo) */
+    uint8_t brillo_real;
+    uint8_t fuego_real;       
+    uint8_t saturacion_real;
+    uint8_t pureza_real;
+    uint16_t quilates;
+
+    /* ATRIBUTOS APARENTES (Percepción del jugador y mercado) */
+    uint8_t brillo_aparente;
+    uint8_t fuego_aparente;
+    uint8_t calidad_aparente; 
+    
+    int8_t sesgo_visual;      
+} AtributosGema;
+
 /* ------------------------------------------------------------------ */
 /* Accesores de los campos empaquetados en seed                       */
 /* ------------------------------------------------------------------ */
 
-uint8_t  gema_ciudad_id(const Gema *g);   /* bits 31..24 */
-uint8_t  gema_dia(const Gema *g);         /* bits 23..16 */
-uint16_t gema_rand(const Gema *g);        /* bits 15.. 0 */
+uint8_t  gema_ciudad_id(const Gema *g);   
+uint8_t  gema_dia(const Gema *g);         
+uint16_t gema_rand(const Gema *g);        
 
 /* ------------------------------------------------------------------ */
-/* Ciclo de vida                                                      */
+/* Ciclo de vida y Evolución de Fases                                 */
 /* ------------------------------------------------------------------ */
 
 void gema_init(Gema *g);
@@ -88,15 +90,13 @@ void crear_gema_desde_chunk(
     uint8_t        dia_actual
 );
 
-/* ------------------------------------------------------------------ */
-/* Evolución                                                          */
-/* ------------------------------------------------------------------ */
-
-int gema_evolucionar(Gema *g);
+/* Control de transiciones de fase */
+int gema_cortar(Gema *g);
+int gema_pulir(Gema *g, uint8_t random_roll, uint8_t umbral_fallo);
 int gema_campo_visible(const Gema *g, uint8_t campo);
 
 /* ------------------------------------------------------------------ */
-/* Atributos derivados                                                */
+/* Atributos derivados y Simulación Procedural                        */
 /* ------------------------------------------------------------------ */
 
 TipoOpalo   gema_tipo(const Gema *g);
@@ -105,6 +105,8 @@ uint8_t     gema_brillo(const Gema *g);
 uint8_t     gema_pureza(const Gema *g);
 uint8_t     gema_iridiscencia(const Gema *g);
 uint8_t     gema_saturacion(const Gema *g);
+
+void gema_calcular_atributos(const Gema *g, AtributosGema *out_attr);
 
 /* ------------------------------------------------------------------ */
 /* Pistas                                                             */
@@ -115,7 +117,7 @@ uint8_t gema_pista_patron(const Gema *g);
 uint8_t gema_pista_intensidad(const Gema *g);
 
 /* ------------------------------------------------------------------ */
-/* Economía                                                           */
+/* Economía Exponencial                                               */
 /* ------------------------------------------------------------------ */
 
 uint32_t gema_valor_real(const Gema *g);

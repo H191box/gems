@@ -69,7 +69,10 @@ int main() {
     // 3. Cargar entorno visual basándose en la ciudad recuperada de la SRAM
     aplicar_paleta_segun_bioma(ciudad_actual_idx);
     dibujar_menu(0);
+    
     fade_in();
+    
+    
 
     // 4. Bucle principal del juego (Game Loop)
     while (1) {
@@ -88,8 +91,8 @@ int main() {
 
         // Sincronización de refresco Vertical (VBlank) 
         // Evita el screen tearing (pantalla partida) y ralentiza el bucle a 60 FPS estables
-        while (REG_VCOUNT >= 160);
-        while (REG_VCOUNT < 160);
+         while (REG_VCOUNT >= 160);
+         while (REG_VCOUNT < 160);
     }
 
     return 0;

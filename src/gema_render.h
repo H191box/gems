@@ -12,15 +12,28 @@ void renderizar_gema_a_buffer(uint8_t *buffer, int w, int h, const Gema *g);
 void renderizar_opalo_pro(uint8_t *buffer, int w, int h, const Gema *g);
 void renderizar_transicion(uint8_t *buf_sal, uint8_t *buf_ent, int progreso);
 
+void renderizar_gema_preview(int x_pos, int y_pos, const Gema* g);
+
+
+
+void generar_paleta_gema(const Gema* g);
+void generar_paleta_gema_rango(const Gema* g, int base, int num_colores);
+
+
 // --- CONTROL DE BUFFERS DE ANIMACIÓN (EWRAM) ---
 uint8_t* get_anim_buf_a(void);
 uint8_t* get_anim_buf_b(void);
 
-// --- ESCENA DE LA MINA Y PIEDRA BRUTA ---
-// Dibuja la roca en la pantalla de minado (corrige el 'implicit declaration' en src/mina.c)
-void renderizar_roca(const Gema* g);
+// --- MANEJO DE CELDAS ---
+// Lógica completa (usada por render_lista)
+void renderizar_gema_celda(int x_pos, int y_pos, const Gema* g, int base, int num_colores);
 
-// Versión reducida de la piedra bruta para menús o inventario de la mina
+// Versión simplificada (usada por render_thumb, render_g2, render_g3)
+void renderizar_gema(int x_pos, int y_pos, const Gema* g);
+void renderizar_gema_celda_vieja(int x_pos, int y_pos, const Gema* g);
+
+// --- ESCENA DE LA MINA Y PIEDRA BRUTA ---
+void renderizar_roca(const Gema* g);
 void renderizar_roca_pequena(int x_pos, int y_pos, const Gema* g);
 
 // --- MINIATURAS E INVENTARIO ---

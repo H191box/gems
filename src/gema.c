@@ -1,24 +1,14 @@
 /*
  * gema.c
  * Implementación de la entidad Gema — Gacha de Ópalos GBA
- *
- * REGLAS FUNDAMENTALES:
- * 1. La seed empaqueta ciudad_id (bits 31-24), dia (bits 23-16)
- *    y 16 bits de entropía visual (bits 15-0).
- * 2. ciudad_id permite reconstruir el bioma → gema_tipo() es fiel
- *    a la distribución original sin almacenar nada extra.
- * 3. dia permite mostrar la antigüedad del ópalo en la ficha técnica.
- * 4. Todo atributo visual o comercial se deriva desde seed.
- *    Nunca se almacena.
- * 5. seed == 0 es el centinela de ranura vacía.
  */
 
 #include "gema.h"
 #include "opalo.h"
-#include "ciudades.h"   /* ciudades[], NUM_TOTAL_CIUDADES */
+#include "ciudades.h"   
 
 /* ------------------------------------------------------------------ */
-/* Hash interno                                                        */
+/* Hash e indexación interna                                           */
 /* ------------------------------------------------------------------ */
 
 static uint32_t hash32(uint32_t x)
@@ -31,14 +21,12 @@ static uint32_t hash32(uint32_t x)
     return x;
 }
 
-/*
- * Extrae un valor en [0, rango) para un slot independiente.
- * Opera sobre los 16 bits de entropía para que ciudad_id y dia
- * no interfieran con los atributos visuales.
+/* * SOLUCIÓN AL WARNING: 'rango' ahora es uint16_t para soportar 256 de forma segura
+ * y evitar una catástrofe de división por cero en el procesador ARM7TDMI.
  */
-static uint8_t slot(uint32_t seed, uint8_t s, uint8_t rango)
+static uint8_t slot(uint32_t seed, uint8_t s, uint16_t rango)
 {
-    uint32_t entropy = seed & 0xFFFFu;  /* solo los 16 bits de rand */
+    uint32_t entropy = seed & 0xFFFFu;  
     return (uint8_t)(hash32(entropy ^ ((uint32_t)s * 0x9e3779b9u)) % rango);
 }
 
@@ -46,50 +34,31 @@ static uint8_t slot(uint32_t seed, uint8_t s, uint8_t rango)
 /* Accesores de campos empaquetados en seed                           */
 /* ------------------------------------------------------------------ */
 
-uint8_t gema_ciudad_id(const Gema *g)
-{
-    return (uint8_t)((g->seed >> 24) & 0xFF);
-}
-
-uint8_t gema_dia(const Gema *g)
-{
-    return (uint8_t)((g->seed >> 16) & 0xFF);
-}
-
-uint16_t gema_rand(const Gema *g)
-{
-    return (uint16_t)(g->seed & 0xFFFF);
-}
+uint8_t gema_ciudad_id(const Gema *g)  { return (uint8_t)((g->seed >> 24) & 0xFF); }
+uint8_t gema_dia(const Gema *g)        { return (uint8_t)((g->seed >> 16) & 0xFF); }
+uint16_t gema_rand(const Gema *g)      { return (uint16_t)(g->seed & 0xFFFF); }
 
 /* ------------------------------------------------------------------ */
-/* Distribución de tipo por bioma                                     */
-/*                                                                    */
-/* Duplicada desde opalo.c — si cambias allí, cambia aquí también.   */
+/* Distribución de tipo por bioma (6 Elementos Reales)                 */
 /* ------------------------------------------------------------------ */
 
-static const TipoOpalo CICLO[5] = {
-    OPALO_CRISTAL,
-    OPALO_BLANCO,
-    OPALO_ROSA,
-    OPALO_FUEGO,
-    OPALO_NEGRO
+static const TipoOpalo CICLO[6] = {
+    OPALO_CRISTAL, 
+    OPALO_BLANCO, 
+    OPALO_ROSA, 
+    OPALO_FUEGO, 
+    OPALO_NEGRO,
+    OPALO_GRIS     
 };
 
-static const int8_t BIOMA_AFIN[5] = {
-    0,  /* Bioma 0 Glaciar → CRISTAL */
-    1,  /* Bioma 1 Bosque  → BLANCO  */
-    2,  /* Bioma 2 Costa   → ROSA    */
-    4,  /* Bioma 3 Pantano → NEGRO   */
-    3,  /* Bioma 4 Cañón   → FUEGO   */
-};
+static const int8_t BIOMA_AFIN[5] = { 0, 1, 2, 4, 3 };
 
 static TipoOpalo derivar_tipo(uint32_t seed, uint8_t bioma)
 {
-    uint32_t h = hash32(seed & 0xFFFFu);  /* solo entropía */
-
+    uint32_t h = hash32(seed & 0xFFFFu);
     int pesos[6];
-    for (int i = 0; i < 5; i++) pesos[i] = 20;
-    pesos[5] = 20;
+    
+    for (int i = 0; i < 6; i++) pesos[i] = 20;
 
     if (bioma < 5) {
         int afin       = BIOMA_AFIN[bioma];
@@ -106,35 +75,32 @@ static TipoOpalo derivar_tipo(uint32_t seed, uint8_t bioma)
         pesos[adj_op_a]   -= 10;
         pesos[adj_op_b]   -= 10;
 
-        for (int i = 0; i < 5; i++)
+        for (int i = 0; i < 5; i++) {
             if (pesos[i] < 1) pesos[i] = 1;
+        }
     }
 
     int total = 0;
     for (int i = 0; i < 6; i++) total += pesos[i];
 
     int r = (int)((h >> 4) % (uint32_t)total);
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         r -= pesos[i];
         if (r < 0) return CICLO[i];
     }
-    return OPALO_GRIS;
+    
+    return OPALO_GRIS; 
 }
 
 /* ------------------------------------------------------------------ */
-/* Tabla de visibilidad por etapa                                     */
+/* Visibilidad por etapa                                              */
 /* ------------------------------------------------------------------ */
 
 static const uint8_t VISIBILIDAD[3] = {
-    /* ETAPA_BRUTA   */ 0x00,
-    /* ETAPA_CORTADA */ CAMPO_BRILLO | CAMPO_PATRON,
-    /* ETAPA_PULIDA  */ CAMPO_TIPO | CAMPO_PATRON | CAMPO_BRILLO
-                      | CAMPO_PUREZA | CAMPO_VALOR,
+    0x00,
+    CAMPO_BRILLO | CAMPO_PATRON,
+    CAMPO_TIPO | CAMPO_PATRON | CAMPO_BRILLO | CAMPO_PUREZA | CAMPO_VALOR,
 };
-
-/* ------------------------------------------------------------------ */
-/* Ciclo de vida                                                      */
-/* ------------------------------------------------------------------ */
 
 void gema_init(Gema *g)
 {
@@ -144,10 +110,7 @@ void gema_init(Gema *g)
     g->flags    = 0;
 }
 
-int gema_es_valida(const Gema *g)
-{
-    return (g->seed != 0);
-}
+int gema_es_valida(const Gema *g) { return (g->seed != 0); }
 
 int gema_campo_visible(const Gema *g, uint8_t campo)
 {
@@ -155,26 +118,37 @@ int gema_campo_visible(const Gema *g, uint8_t campo)
     return (VISIBILIDAD[g->etapa] & campo) != 0;
 }
 
-int gema_evolucionar(Gema *g)
+/* ------------------------------------------------------------------ */
+/* Gestión del Taller de Evolución                                    */
+/* ------------------------------------------------------------------ */
+
+int gema_cortar(Gema *g)
 {
-    if (g->etapa >= ETAPA_PULIDA) return 0;
-    g->etapa++;
+    if (g->etapa != ETAPA_BRUTA) return 0;
+    g->etapa = ETAPA_CORTADA;
+    return 1;
+}
+
+int gema_pulir(Gema *g, uint8_t random_roll, uint8_t umbral_fallo)
+{
+    if (g->etapa != ETAPA_CORTADA) return 0;
+    g->etapa = ETAPA_PULIDA;
+    
+    if (random_roll < umbral_fallo) {
+        g->flags |= GEMA_FLAG_GRIETAS; 
+    }
     return 1;
 }
 
 /* ------------------------------------------------------------------ */
 /* Atributos derivados                                                */
-/*                                                                    */
-/* gema_tipo() recupera el bioma desde ciudad_id — fiel a la         */
-/* distribución original, sin aproximaciones.                        */
 /* ------------------------------------------------------------------ */
 
 TipoOpalo gema_tipo(const Gema *g)
 {
     uint8_t ciudad = gema_ciudad_id(g);
     uint8_t bioma  = 0;
-    if (ciudad < NUM_TOTAL_CIUDADES)
-        bioma = ciudades[ciudad].bioma_id;
+    if (ciudad < NUM_TOTAL_CIUDADES) bioma = ciudades[ciudad].bioma_id;
     return derivar_tipo(g->seed, bioma);
 }
 
@@ -189,23 +163,9 @@ PatronOpalo gema_patron(const Gema *g)
     else               return PATRON_HARLEQUIN;
 }
 
-uint8_t gema_brillo(const Gema *g)
-{
-    uint8_t v = slot(g->seed, 12, 16);
-    return (uint8_t)(16 + (v * v / 15));
-}
-
-uint8_t gema_saturacion(const Gema *g)
-{
-    uint8_t v = slot(g->seed, 13, 16);
-    return (uint8_t)(16 + (v * v / 15));
-}
-
-uint8_t gema_iridiscencia(const Gema *g)
-{
-    uint8_t v = slot(g->seed, 14, 16);
-    return (uint8_t)(16 + (v * v / 15));
-}
+uint8_t gema_brillo(const Gema *g)       { uint8_t v = slot(g->seed, 12, 16); return (uint8_t)(16 + (v * v / 15)); }
+uint8_t gema_saturacion(const Gema *g)   { uint8_t v = slot(g->seed, 13, 16); return (uint8_t)(16 + (v * v / 15)); }
+uint8_t gema_iridiscencia(const Gema *g) { uint8_t v = slot(g->seed, 14, 16); return (uint8_t)(16 + (v * v / 15)); }
 
 uint8_t gema_pureza(const Gema *g)
 {
@@ -217,160 +177,166 @@ uint8_t gema_pureza(const Gema *g)
 }
 
 /* ------------------------------------------------------------------ */
-/* Pistas — ruidosas por diseño                                       */
+/* Simulación procedural de Apariencia                                */
 /* ------------------------------------------------------------------ */
 
-uint8_t gema_pista_color(const Gema *g)
+void gema_calcular_atributos(const Gema *g, AtributosGema *attr)
 {
-    uint8_t ruido = slot(g->seed, 20, 3);
-    if (ruido == 0)
-        return (uint8_t)gema_tipo(g);
-    return (uint8_t)(((uint8_t)gema_tipo(g) + ruido) % NUM_TIPOS_OPALO);
-}
+    if (!g || !attr) return;
 
-uint8_t gema_pista_patron(const Gema *g)
-{
-    return slot(g->seed, 21, 6);
-}
+    /* Aquí ya no saltará warning gracias al rango uint16_t de slot() */
+    attr->brillo_real     = slot(g->seed, 12, 256);
+    attr->fuego_real      = slot(g->seed, 14, 256); 
+    attr->saturacion_real = slot(g->seed, 13, 256);
+    attr->pureza_real     = slot(g->seed, 15, 256);
+    attr->quilates        = g->quilates;
 
-uint8_t gema_pista_intensidad(const Gema *g)
-{
-    return (uint8_t)(1 + slot(g->seed, 22, 4));
+    int32_t raw_sesgo = slot(g->seed, 30, 81); 
+    attr->sesgo_visual = (int8_t)(raw_sesgo - 40);
+
+    if (g->etapa == ETAPA_BRUTA) { 
+        float factor_calidad = attr->brillo_real / 255.0f;
+        int32_t sesgo_aplicado = (int32_t)(attr->sesgo_visual * (0.5f + factor_calidad));
+
+        int32_t b_ap = (int32_t)attr->brillo_real - 40 + sesgo_aplicado;
+        int32_t f_ap = (int32_t)attr->fuego_real - 50 + sesgo_aplicado;
+
+        attr->brillo_aparente = (uint8_t)(b_ap < 0 ? 0 : (b_ap > 255 ? 255 : b_ap));
+        attr->fuego_aparente  = (uint8_t)(f_ap < 0 ? 0 : (f_ap > 255 ? 255 : f_ap));
+    }
+    else if (g->etapa == ETAPA_CORTADA) { 
+        int32_t b_ap = (int32_t)attr->brillo_real - 10 + (attr->sesgo_visual / 2);
+        int32_t f_ap = (int32_t)attr->fuego_real - 10 + (attr->sesgo_visual / 2);
+
+        attr->brillo_aparente = (uint8_t)(b_ap < 0 ? 0 : (b_ap > 255 ? 255 : b_ap));
+        attr->fuego_aparente  = (uint8_t)(f_ap < 0 ? 0 : (f_ap > 255 ? 255 : f_ap));
+    }
+    else { 
+        attr->brillo_aparente = attr->brillo_real;
+        attr->fuego_aparente  = attr->fuego_real;
+    }
+
+    attr->calidad_aparente = (uint8_t)(((uint32_t)attr->brillo_aparente + attr->fuego_aparente) / 2);
+
+    if (g->flags & GEMA_FLAG_GRIETAS) {
+        attr->brillo_aparente /= 2;
+        attr->fuego_aparente   /= 3;
+        attr->calidad_aparente /= 2;
+    }
 }
 
 /* ------------------------------------------------------------------ */
-/* Economía                                                           */
+/* Motor de Economía Exponencial                                      */
 /* ------------------------------------------------------------------ */
+
+static uint32_t aplicar_curva_exponencial(uint32_t precio_por_quilate, uint16_t quilates)
+{
+    if (quilates == 0) return 0;
+
+    uint64_t total = (uint64_t)precio_por_quilate * quilates;
+    uint64_t factor_exponencial = 100; 
+    int tramos = quilates / 30;
+
+    for (int i = 0; i < tramos; i++) {
+        factor_exponencial = (factor_exponencial * 125u) / 100u;
+        if (factor_exponencial > 500000u) { 
+            factor_exponencial = 500000u;
+            break;
+        }
+    }
+
+    uint64_t precio_final = (total * factor_exponencial) / 100u;
+    if (precio_final > 0xFFFFFFFFu) return 0xFFFFFFFFu;
+
+    return (uint32_t)precio_final;
+}
 
 uint32_t gema_valor_real(const Gema *g)
 {
-    if (!gema_es_valida(g))      return 0;
-    if (g->etapa < ETAPA_PULIDA) return 0;
+    if (!gema_es_valida(g)) return 0;
 
     TipoOpalo   tipo   = gema_tipo(g);
     PatronOpalo patron = gema_patron(g);
     if ((uint8_t)tipo >= NUM_TIPOS_OPALO) return 0;
 
-    /* Precio base por quilate segun tipo */
-    static const uint16_t PRECIO_QUILATE[NUM_TIPOS_OPALO] = {
-        /* NEGRO   */ 48,
-        /* CRISTAL */ 32,
-        /* FUEGO   */ 38,
-        /* BLANCO  */ 14,
-        /* ROSA    */ 20,
-        /* GRIS    */  6,
+    static const uint16_t PRECIO_QUILATE_BASE[NUM_TIPOS_OPALO] = {
+        /* NEGRO   */ 45, /* CRISTAL */ 30, /* FUEGO   */ 35, 
+        /* BLANCO  */ 12, /* ROSA    */ 18, /* GRIS    */  5,
     };
 
-    /* Multiplicador de patron x10 (NEBULA=x1.0, HARLEQUIN=x3.0) */
     static const uint8_t MULT_PATRON[6] = {
-        /* NEBULA    */ 10,
-        /* VENAS     */ 12,
-        /* MATRIX    */ 14,
-        /* MOSAICO   */ 18,
-        /* CHAOS     */ 22,
-        /* HARLEQUIN */ 30,
+        /* NEBULA */ 10, /* VENAS */ 12, /* MATRIX */ 15, 
+        /* MOSAICO */ 20, /* CHAOS */ 25, /* HARLEQUIN */ 35
     };
 
-    uint32_t precio_q = PRECIO_QUILATE[(uint8_t)tipo];
-    uint32_t mult     = MULT_PATRON[(uint8_t)patron];
+    uint32_t precio_q = (PRECIO_QUILATE_BASE[(uint8_t)tipo] * MULT_PATRON[(uint8_t)patron]) / 10u;
+    precio_q += (slot(g->seed, 12, 50)) + (slot(g->seed, 14, 50)); 
 
-    /* FIX: cap de quilates para evitar desbordamiento uint32_t.
-     * Sin cap: 48 * 30 * 20020^2 / 100 desborda ampliamente.
-     * Con cap 1000: valor máximo = 48 * 30 * 1000 * 1000 / 100
-     *             = 14.400.000, bien dentro de uint32_t. */
-    uint32_t q = g->quilates;
-    if (q > 1000u) q = 1000u;
+    uint32_t valor = aplicar_curva_exponencial(precio_q, g->quilates);
 
-    /* Dividir antes de la segunda multiplicación para evitar overflow:
-     * precio_q * mult <= 48 * 30 = 1440
-     * 1440 * 1000 = 1.440.000  (seguro)
-     * 1.440.000 * 1000 / 100 = 14.400.000 (seguro) */
-    uint32_t valor = precio_q * mult * q / 10u * q / 10u;
+    if (g->flags & GEMA_FLAG_GRIETAS) {
+        valor = (valor * 30u) / 100u;
+    }
 
-    /* Bonus de atributos -- complemento fino, no protagonista */
-    uint32_t bonus = 0;
-    bonus += (uint32_t)gema_brillo(g)      * 2u;
-    bonus += (uint32_t)gema_pureza(g)      * 3u;
-    bonus += (uint32_t)gema_iridiscencia(g);
-    bonus += (uint32_t)gema_saturacion(g);
-
-    return valor + bonus;
+    return valor;
 }
 
 uint32_t gema_valor_estimado(const Gema *g)
 {
     if (!gema_es_valida(g)) return 0;
 
-    if (g->etapa >= ETAPA_PULIDA)
+    if (g->etapa >= ETAPA_PULIDA) {
         return gema_valor_real(g);
-
-    if (g->etapa == ETAPA_CORTADA) {
-        uint32_t est = 100u;
-        est += (uint32_t)gema_brillo(g) * 2u;
-        PatronOpalo patron = gema_patron(g);
-        if      (patron == PATRON_HARLEQUIN) est += 150;
-        else if (patron == PATRON_MOSAICO)   est += 50;
-        est += (uint32_t)g->quilates / 12u;
-        return est;
     }
 
-    /* ETAPA_BRUTA: estimacion muy vaga basada en quilates y pista.
-     * FIX: cap para evitar desbordamiento con quilates de jackpot.
-     * Sin cap: 20020^2 / 50 = ~8.016.008 (pasa, pero rozando)
-     * Con cap garantizamos que nunca desborda. */
-    uint32_t q = g->quilates;
-    if (q > 1000u) q = 1000u;
+    AtributosGema attr;
+    gema_calcular_atributos(g, &attr);
 
-    uint32_t est = 40u;
-    est += (uint32_t)gema_pista_intensidad(g) * 10u;
-    est += q * q / 50u;
-    return est;
+    TipoOpalo tipo = gema_tipo(g);
+    static const uint16_t PRECIO_QUILATE_BASE[NUM_TIPOS_OPALO] = { 45, 30, 35, 12, 18, 5 };
+    uint32_t precio_q_estimado = PRECIO_QUILATE_BASE[(uint8_t)tipo];
+
+    /* SOLUCIÓN AL ERROR: Eliminado 'precio_q_estimated' y líneas rotas */
+    if (g->etapa == ETAPA_CORTADA) { 
+        precio_q_estimado = (precio_q_estimado * 75u) / 100u;
+        precio_q_estimado += (attr.calidad_aparente / 4);
+        return aplicar_curva_exponencial(precio_q_estimado, g->quilates);
+    }
+
+    precio_q_estimado = (precio_q_estimado * 18u) / 100u;
+    precio_q_estimado += (attr.calidad_aparente / 8);
+
+    uint32_t valor_f1 = aplicar_curva_exponencial(precio_q_estimado, g->quilates);
+    return (valor_f1 < 10u) ? 10u : valor_f1;
 }
 
 /* ------------------------------------------------------------------ */
-/* crear_gema_desde_chunk                                             */
-/*                                                                    */
-/* Construye la seed empaquetada:                                     */
-/*   bits 31-24 → ciudad_id  (del chunk)                             */
-/*   bits 23-16 → dia_actual (del estado de juego)                   */
-/*   bits 15- 0 → hash de chunk->seed, truncado a 16 bits            */
-/*                                                                    */
-/* La parte rand mezcla la seed del chunk con ciudad_id para que     */
-/* dos chunks idénticos en ciudades distintas den ópalos distintos.  */
+/* Resto de utilidades de ciclo de vida e interfaz                    */
 /* ------------------------------------------------------------------ */
 
-void crear_gema_desde_chunk(Gema *g, const Chunk *chunk,
-                             uint8_t ciudad_id, uint8_t dia_actual)
+void gema_pista_color_u8(const Gema *g, uint8_t *ruido_out) { *ruido_out = slot(g->seed, 20, 3); }
+
+uint8_t gema_pista_color(const Gema *g)
 {
-    uint16_t rand_part = (uint16_t)(
-        hash32(chunk->seed ^ ((uint32_t)ciudad_id * 0x9e3779b9u)) & 0xFFFFu
-    );
+    uint8_t ruido;
+    gema_pista_color_u8(g, &ruido);
+    if (ruido == 0) return (uint8_t)gema_tipo(g);
+    return (uint8_t)(((uint8_t)gema_tipo(g) + ruido) % NUM_TIPOS_OPALO);
+}
 
-    /* seed 0 no es válida — forzar al menos rand_part = 1 */
-    if (rand_part == 0 && ciudad_id == 0 && dia_actual == 0)
-        rand_part = 1;
+uint8_t gema_pista_patron(const Gema *g)     { return slot(g->seed, 21, 6); }
+uint8_t gema_pista_intensidad(const Gema *g) { return (uint8_t)(1 + slot(g->seed, 22, 4)); }
 
-    g->seed  = ((uint32_t)ciudad_id  << 24)
-             | ((uint32_t)dia_actual << 16)
-             | (uint32_t)rand_part;
+void crear_gema_desde_chunk(Gema *g, const Chunk *chunk, uint8_t ciudad_id, uint8_t dia_actual)
+{
+    uint16_t rand_part = (uint16_t)(hash32(chunk->seed ^ ((uint32_t)ciudad_id * 0x9e3779b9u)) & 0xFFFFu);
+    if (rand_part == 0 && ciudad_id == 0 && dia_actual == 0) rand_part = 1;
 
+    g->seed  = ((uint32_t)ciudad_id  << 24) | ((uint32_t)dia_actual << 16) | (uint32_t)rand_part;
     g->etapa    = ETAPA_BRUTA;
     g->flags    = 0;
-
-    /* Quilates: base del chunk + pequeña variación */
-    g->quilates = chunk->quilates
-                + (uint16_t)(hash32(rand_part) % 30u);
+    g->quilates = chunk->quilates + (uint16_t)(hash32(rand_part) % 30u);
 }
-
-/* ------------------------------------------------------------------ */
-/* Serialización little-endian (compatible GBA SAV)                  */
-/*                                                                    */
-/* Layout (8 bytes):                                                  */
-/*   [0-3]  seed      (little-endian)                                */
-/*   [4-5]  quilates  (little-endian)                                */
-/*   [6]    etapa                                                     */
-/*   [7]    flags                                                     */
-/* ------------------------------------------------------------------ */
 
 int gema_serializar(const Gema *g, uint8_t *buf)
 {
@@ -378,7 +344,7 @@ int gema_serializar(const Gema *g, uint8_t *buf)
     buf[1] = (uint8_t)((g->seed >>  8) & 0xFF);
     buf[2] = (uint8_t)((g->seed >> 16) & 0xFF);
     buf[3] = (uint8_t)((g->seed >> 24) & 0xFF);
-    buf[4] = (uint8_t)( g->quilates        & 0xFF);
+    buf[4] = (uint8_t)( g->quilates    & 0xFF);
     buf[5] = (uint8_t)((g->quilates >>  8) & 0xFF);
     buf[6] = g->etapa;
     buf[7] = g->flags;
@@ -387,38 +353,21 @@ int gema_serializar(const Gema *g, uint8_t *buf)
 
 int gema_deserializar(Gema *g, const uint8_t *buf)
 {
-    g->seed = (uint32_t)buf[0]
-            | ((uint32_t)buf[1] <<  8)
-            | ((uint32_t)buf[2] << 16)
-            | ((uint32_t)buf[3] << 24);
-
-    g->quilates = (uint16_t)buf[4]
-                | ((uint16_t)buf[5] << 8);
-
+    g->seed = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) | ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+    g->quilates = (uint16_t)buf[4] | ((uint16_t)buf[5] << 8);
     g->etapa = buf[6];
     g->flags = buf[7];
-
     if (g->etapa > ETAPA_PULIDA) return 0;
     if (g->seed  == 0)           return 0;
-
     return 1;
 }
-
-/* ------------------------------------------------------------------ */
-/* Conversión temporal Opalo <-> Gema                                */
-/* ------------------------------------------------------------------ */
 
 void opalo_to_gema(const Opalo *o, Gema *g)
 {
     gema_init(g);
-    /*
-     * Un Opalo no tiene ciudad_id ni dia — se pierden al convertir.
-     * Se rellena con ciudad 0, dia 0, y la seed del opalo como rand.
-     * Suficiente para renderizado; no apto para ficha técnica real.
-     */
     uint16_t rand_part = (uint16_t)(o->seed & 0xFFFFu);
     if (rand_part == 0) rand_part = 1;
-    g->seed     = (uint32_t)rand_part;   /* ciudad=0, dia=0, rand=seed */
+    g->seed     = (uint32_t)rand_part; 
     g->quilates = o->quilates;
     g->etapa    = ETAPA_PULIDA;
     g->flags    = 0;

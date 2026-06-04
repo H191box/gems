@@ -1,381 +1,167 @@
-PLAN DE REFACTORIZACIÓN DEL SISTEMA DE GEMAS
-Proyecto: Gacha de Ópalos GBA
-Objetivo principal
+# 🧠 Arquitectura Final de Renderizado GBA (Versión Estable Sin Flicker)
 
-Reducir el tamaño de las partidas guardadas y eliminar datos redundantes almacenados en Gema.
+## 🎯 Objetivo
 
-La filosofía nueva será:
+Eliminar completamente:
+- Flicker de paleta
+- Parpadeo de fondo
+- Inestabilidad visual por DMA
+- Mutaciones de VRAM durante el frame
+- Conflictos entre UI / fondo / gema
 
-Una gema almacena únicamente información persistente.
+---
 
-Toda información derivable se recalcula cuando se necesite.
+# 🧱 Arquitectura General del Renderer
 
-Estado actual
+El sistema se divide en 3 capas fijas e independientes:
 
-Actualmente una Gema almacena:
 
-id
-etapa
+CAPA 1 → FONDO (dithering beige)
+CAPA 2 → GEMAS (buffer software)
+CAPA 3 → UI (texto/overlay)
 
-tipo_real
-patron_real
 
-brillo_real
-pureza_real
-iridiscencia
-saturacion
+---
 
-pista_color
-pista_intensidad
-pista_patron
+# 🧩 Problema Actual
 
-quilates
+El flicker viene de:
 
-seed_visual
+## ❌ Problemas detectados
 
-Muchos de estos valores:
+- Escritura constante a `0x05000000` (paleta global)
+- Regeneración de fondo cada frame
+- Uso de DMA sin sincronización VBlank estricta
+- Mezcla de UI + fondo + gema en estado mutable
+- Falta de doble buffer real
+- Render no determinista por frame
 
-Nunca cambian.
-Se generan una sola vez.
-Son completamente deterministas.
+---
 
-Por tanto no necesitan almacenarse.
+# 🧠 Solución Global
 
-Nuevo modelo conceptual
-Chunk
+## 🔵 1. DOBLE BUFFER REAL
 
-Representa un hallazgo en bruto.
+```c
+uint8_t* bufA = get_anim_buf_a();
+uint8_t* bufB = get_anim_buf_b();
 
-Contiene:
-
-seed
-bioma
-profundidad
-etc
-
-Sólo existe durante la generación.
-
-Gema
-
-Representa un objeto coleccionable persistente.
-
-Debe almacenar únicamente:
-
-typedef struct
+uint8_t* buf_front;
+uint8_t* buf_back;
+Swap por frame:
+static inline void swap_buffers(void)
 {
-    uint32_t seed;
-
-    uint16_t quilates;
-
-    uint8_t etapa;
-
-    uint8_t flags;
+    uint8_t* tmp = buf_front;
+    buf_front = buf_back;
+    buf_back = tmp;
 }
-Gema;
+🔵 2. PIPELINE DE RENDER ESTABLE
 
-Tamaño aproximado:
+Orden obligatorio del frame:
 
-8 bytes
-
-o
-
-12 bytes
-
-según alineación.
-
-Opalo
-
-Representa una reconstrucción temporal para renderizado.
-
-No se guarda.
-
-Se reconstruye desde:
-
-Gema
-↓
-generar_opalo_desde_gema()
-↓
-Opalo temporal
-Principio fundamental
-
-Toda propiedad visual o comercial debe derivarse de:
-
-seed
-+
-quilates
-+
-etapa
-
-Nunca almacenarse.
-
-FASE 1 — Unificar la semilla
-Objetivo
-
-Eliminar seed_visual.
-
-Guardar una única seed canónica.
-
-Archivos a modificar
-gema.h
-
-Eliminar:
-
-seed_visual
-
-Añadir:
-
-seed
-
-como semilla principal.
-
-gema.c
-
-Modificar:
-
-crear_gema_desde_chunk()
-
-para guardar directamente la seed original.
-
-opalo.c
-
-Modificar:
-
-generar_opalo_desde_gema()
-
-para usar:
-
-g->seed
-
-en lugar de:
-
-g->seed_visual
-save.c
-
-Actualizar serialización.
-
-FASE 2 — Eliminar atributos permanentes
-Objetivo
-
-Eliminar atributos derivados.
-
-Campos eliminados
-tipo_real
-patron_real
-
-brillo_real
-pureza_real
-iridiscencia
-saturacion
-Nuevo enfoque
-
-Crear funciones puras:
-
-tipo_opalo(seed)
-
-patron_opalo(seed)
-
-pureza_opalo(seed)
-
-brillo_opalo(seed)
-
-iridiscencia_opalo(seed)
-
-saturacion_opalo(seed)
-Archivos a modificar
-gema.h
-
-Eliminar los campos anteriores.
-
-gema.c
-
-Crear funciones derivadas.
-
-opalo.c
-
-Reemplazar lecturas directas de la estructura.
-
-Antes:
-
-g->tipo_real
-
-Después:
-
-tipo_opalo(g->seed)
-galeria.c
-
-Actualizar todas las pantallas de información.
-
-FASE 3 — Eliminar pistas almacenadas
-Objetivo
-
-Las pistas no ocupan memoria.
-
-Se generan dinámicamente.
-
-Campos eliminados
-pista_color
-pista_patron
-pista_intensidad
-Nuevo sistema
-
-Funciones:
-
-obtener_pista_color(seed)
-
-obtener_pista_patron(seed)
-
-obtener_pista_intensidad(seed)
-Archivos a modificar
-gema.h
-
-Eliminar los tres campos.
-
-gema.c
-
-Crear generadores de pistas.
-
-galeria.c
-
-Mostrar pistas generadas al vuelo.
-
-FASE 4 — Reescribir el cálculo de valor
-Objetivo
-
-Hacer que los ópalos memorables sean los más valiosos.
-
-Problema actual
-
-La valoración depende demasiado de:
-
-pureza
-brillo
-saturación
-
-y poco de:
-
-tipo
-patrón
-Nuevo enfoque
-
-Valor base:
-
-tipo
-+
-patrón
-
-Modificadores:
-
-quilates
-pureza
-brillo
-
-Bonificaciones especiales:
-
-combinaciones raras
-tipos extremadamente raros
-patrones legendarios
-Archivos a modificar
-gema.c
-
-Reescribir:
-
-calcular_valor_gema()
-galeria.c
-
-Actualizar textos de valoración.
-
-FASE 5 — Introducir información oculta real
-Objetivo
-
-Dar sentido al proceso de trabajo.
-
-BRUTA
-
-Información visible:
-
-quilates aproximados
-pistas
-CORTADA
-
-Información visible:
-
-tipo confirmado
-patrón confirmado
-PULIDA
-
-Información visible:
-
-todos los atributos
-valor definitivo
-Ventaja
-
-Ahora sí existe progresión real:
-
-BRUTA
-↓
-INCERTIDUMBRE
-
-CORTADA
-↓
-DESCUBRIMIENTO
-
-PULIDA
-↓
-REVELACIÓN COMPLETA
-Archivos a modificar
-galeria.c
-
-Pantallas de información.
-
-gema.c
-
-Funciones de consulta por etapa.
-
-FASE 6 — Compactación final de SRAM
-Objetivo
-
-Preparar el juego para miles de gemas.
-
-Posible estructura final
-typedef struct
+void render_frame(const Gema* g, int offset_opalo, int offset_bg)
 {
-    uint32_t seed;
-    uint16_t quilates;
+    vsync(); // sincronización obligatoria con VBlank
 
-    uint8_t etapa;
-    uint8_t flags;
+    swap_buffers();
+
+    static int last_bg = -999;
+    if (offset_bg != last_bg) {
+        precalcular_fondo(offset_bg);
+        last_bg = offset_bg;
+    }
+
+    renderizar_gema_a_buffer(buf_back, 240, 160, g);
+
+    volcar_frame(buf_back, offset_opalo, offset_bg);
+
+    draw_ui_sobre_buffer("GALERIA");
 }
-Gema;
-Resultado esperado
+🔵 3. PALETA ESTABLE (CRÍTICO)
+❌ Prohibido:
+Modificar paleta global en runtime desde múltiples funciones
+❌ NO HACER:
+pal[xx] = ...
+✅ Solución: Paleta doble buffer
+static uint16_t pal_front[256];
+static uint16_t pal_back[256];
 
-Situación actual:
+void swap_paleta(void)
+{
+    memcpy((void*)0x05000000, pal_back, 512);
+}
+🔵 4. DIVISIÓN DE PALETA
+0–15     → UI / fondo
+16–200   → gemas / plasma
+201–255  → efectos / brillo
+🔵 5. FONDO OPTIMIZADO
+❌ Antes:
+precalcular_fondo(offset_bg); // cada frame
+✅ Ahora:
+static int last_bg = -1;
 
-20 bytes por gema
+if (offset_bg != last_bg) {
+    precalcular_fondo(offset_bg);
+    last_bg = offset_bg;
+}
+🔵 6. DMA SEGURO (VBLANK ONLY)
 
-Objetivo:
+Regla:
 
-8 bytes por gema
+DMA SOLO después de vsync, nunca durante render
 
-Reducción:
+void dma_copy_line(uint16_t* src, uint16_t* dst)
+{
+    REG_DMA3SAD = (uint32_t)src;
+    REG_DMA3DAD = (uint32_t)dst;
+    REG_DMA3CNT = 120 | (1 << 31);
+}
+🔵 7. FRAME FINAL (ESTABLE)
+void render_frame(const Gema* g, int offset_opalo, int offset_bg)
+{
+    vsync();
 
-60% menos memoria
-Orden recomendado de implementación
-1. Unificar seed
-2. Eliminar seed_visual
-3. Eliminar atributos derivados
-4. Eliminar pistas
-5. Reescribir valoración
-6. Rehacer UI de descubrimiento
-7. Compactar save
-Resultado final
+    swap_buffers();
 
-La gema se convierte en un objeto extremadamente pequeño y estable:
+    if (offset_bg != last_bg) {
+        precalcular_fondo(offset_bg);
+        last_bg = offset_bg;
+    }
 
-Seed  → Identidad completa del ópalo
-Etapa → Qué conoce el jugador
-Quilates → Tamaño físico
-Flags → Estado especial
+    renderizar_gema_a_buffer(buf_back, 240, 160, g);
 
-Todo lo demás se calcula cuando se necesita.
+    volcar_frame(buf_back, offset_opalo, offset_bg);
 
-Eso reduce SRAM, simplifica el código, facilita el equilibrado económico y permite añadir nuevas propiedades en el futuro sin cambiar el formato de guardado.
+    draw_ui_sobre_buffer("GALERIA");
+}
+🚨 ERRORES CRÍTICOS A EVITAR
+❌ Nunca hacer:
+Escribir paleta en múltiples funciones por frame
+Regenerar fondo sin cache
+Usar DMA fuera de VBlank
+Mezclar UI con paleta de gema
+Render directo a VRAM sin buffer
+🧠 Resultado esperado
+
+Con esta arquitectura:
+
+✔ Cero flicker de paleta
+✔ Fondo estable sin parpadeo
+✔ Render determinista por frame
+✔ Pipeline tipo juego comercial GBA
+✔ Escalabilidad para sistemas complejos (galería / inventario / animaciones)
+🚀 Extensiones futuras recomendadas
+Tile engine híbrido para fondo
+Cache de gemas por seed (no render cada frame)
+UI en OAM (sprites reales)
+Sistema de materiales precalculados
+Pipeline de render multietapa tipo consola
+
+---
+
+Si quieres, el siguiente paso lógico es que te lo convierta en:
+
+- 🔧 :contentReference[oaicite:0]{index=0}
+- o directamente un **:contentReference[oaicite:1]{index=1}**
+
+Solo dime.
