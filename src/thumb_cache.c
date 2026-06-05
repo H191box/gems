@@ -40,83 +40,72 @@ void thumb_generar(
     ThumbCache* t,
     uint32_t seed
 ) {
+    /* Construimos la Gema directamente desde la seed.
+     * No hay Opalo, no hay generar_opalo() — Gema es la entidad real. */
+    Gema g;
+    gema_init(&g);
+    g.seed     = seed;
+    g.quilates = 50;   /* valor neutro para thumbnails; no afecta al render */
+    g.etapa    = ETAPA_PULIDA;
 
-    Opalo o;
-    generar_opalo(&o, seed);
+    TipoOpalo tipo       = gema_tipo(&g);
+    uint8_t   color_off  = (uint8_t)(seed & 0xFF);  /* equivale a o.color_offset */
 
-    // Creamos una estructura Gema intermedia fiel a nuestro plan de migración
-    Gema g_temp;
-    opalo_to_gema(&o, &g_temp);
-
-    // mini-paleta simple
+    /* mini-paleta simple indexada por tipo */
     for (int i = 0; i < 16; i++) {
 
-        int r, g, b;
+        int r, g_c, b;
 
-        switch (o.tipo) {
+        switch (tipo) {
 
             case OPALO_NEGRO:
-                r = i;
-                g = i;
-                b = 31;
+                r   = i;
+                g_c = i;
+                b   = 31;
                 break;
 
             case OPALO_CRISTAL:
-                r = 16 + i / 2;
-                g = 16 + i / 2;
-                b = 31;
+                r   = 16 + i / 2;
+                g_c = 16 + i / 2;
+                b   = 31;
                 break;
 
             case OPALO_FUEGO:
-                r = 31;
-                g = i * 2;
-                b = i / 2;
+                r   = 31;
+                g_c = i * 2;
+                b   = i / 2;
                 break;
 
             default:
-                r = i * 2;
-                g = i * 2;
-                b = 31 - i;
+                r   = i * 2;
+                g_c = i * 2;
+                b   = 31 - i;
                 break;
         }
 
-        if (r > 31) r = 31;
-        if (g > 31) g = 31;
-        if (b > 31) b = 31;
+        if (r   > 31) r   = 31;
+        if (g_c > 31) g_c = 31;
+        if (b   > 31) b   = 31;
 
         t->palette[i] =
-            (r & 31) |
-            ((g & 31) << 5) |
-            ((b & 31) << 10);
+            (r   & 31)        |
+            ((g_c & 31) << 5) |
+            ((b   & 31) << 10);
     }
 
-    uint8_t off =
-        (uint8_t)o.color_offset;
-
-    // render offline
+    /* render offline */
     for (int y = 0; y < THUMB_H; y++) {
 
-        int py =
-            (y * 160) / THUMB_H;
+        int py = (y * 160) / THUMB_H;
 
         for (int x = 0; x < THUMB_W; x++) {
 
-            int px =
-                (x * 240) / THUMB_W;
+            int px = (x * 240) / THUMB_W;
 
-            // Ahora pasamos la gema adaptada, satisfaciendo el prototipo esperado
-            uint8_t p =
-                plasma_pixel(
-                    px,
-                    py,
-                    off,
-                    &g_temp
-                );
+            uint8_t p = plasma_pixel(px, py, color_off, &g);
 
-            // reducir 0-255 → 0-15
-            t->pixels[
-                y * THUMB_W + x
-            ] = p >> 4;
+            /* reducir 0-255 → 0-15 */
+            t->pixels[y * THUMB_W + x] = p >> 4;
         }
     }
 

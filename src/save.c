@@ -1,6 +1,6 @@
 #include <stdint.h>
 #include "save.h"
-#include "opalo.h"
+
 #include "data.h"
 #include "gema.h"
 

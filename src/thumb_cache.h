@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "opalo.h"
+#include "gema.h"
 
 #define THUMB_W 52
 #define THUMB_H 64

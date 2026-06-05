@@ -10,7 +10,7 @@
 #include "render.h"
 #include "video.h"
 #include "font.h"
-#include "opalo.h"
+
 #include "gema.h"
 #include "gema_render.h"
 #include "thumb_cache.h"

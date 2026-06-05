@@ -2,7 +2,7 @@
 #define SAVE_H
 
 #include <stdint.h>
-#include "opalo.h"
+
 #include "gema.h"
 
 
