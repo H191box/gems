@@ -144,26 +144,22 @@ void fade_out(void) {
 }
 
 void fade_in(void) {
+    /*
+     * fade_in() NO hace flip. El flip ya lo hizo el render anterior
+     * (render_lista/g2/g3) con vsync+paleta+flip_no_vsync().
+     * El front buffer ya muestra el frame correcto y PALRAM tiene
+     * la paleta correcta. Solo animamos de negro al color real.
+     */
     uint16_t pal_target[PAL_SIZE];
     for (int i = 0; i < PAL_SIZE; i++)
         pal_target[i] = PAL_BG[i];
 
-    // Esperamos al VBlank, y en ese mismo VBlank ponemos negro Y hacemos flip
-    // así ambos cambios ocurren antes de que empiece el siguiente frame
     while (REG_VCOUNT >= 160);
     while (REG_VCOUNT < 160);
     for (int i = 0; i < PAL_SIZE; i++)
         PAL_BG[i] = 0;
-    // flip manual en lugar de llamar a flip() para no consumir otro VBlank
-    if (page) {
-        REG_DISPCNT |=  BACKBUFFER;
-        page = 0;
-    } else {
-        REG_DISPCNT &= ~BACKBUFFER;
-        page = 1;
-    }
 
-    wait_vblanks(60);
+    wait_vblanks(4);
 
     for (int step = 0; step <= 16; step++) {
         for (int i = 0; i < PAL_SIZE; i++)

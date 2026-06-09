@@ -293,3 +293,52 @@ uint8_t plasma_pixel_smooth(int x, int y, uint8_t off, const Gema *g)
 
     return pal_clamp(blended);
 }
+
+/* ================================================================== */
+/* FASE 3 — CACHÉ DE PLASMA BASE                                      */
+/*                                                                    */
+/* Buffer precalculado 80x120 en IWRAM (rápido).                      */
+/* Se regenera una sola vez cuando cambia la gema.                    */
+/* Todos los renders leen de aquí en lugar de llamar a plasma_pixel.  */
+/*                                                                    */
+/* Uso:                                                               */
+/*   plasma_cache_rebuild(g)  — llamar al cambiar de gema             */
+/*   plasma_cache_get(x, y)   — leer un píxel (x en [0,119], y en [0,79]) */
+/* ================================================================== */
+
+/* EWRAM: 256KB — suficiente para el caché de 9.600 bytes            */
+static uint8_t plasma_cache[80][120] __attribute__((section(".ewram")));
+
+static uint32_t plasma_cache_seed     = 0;
+static uint16_t plasma_cache_quilates = 0;
+static uint8_t  plasma_cache_etapa    = 0xFF;
+
+void plasma_cache_rebuild(const Gema *g)
+{
+    /* Evitar reconstruir si la gema no cambió */
+    if (g->seed     == plasma_cache_seed     &&
+        g->quilates == plasma_cache_quilates  &&
+        g->etapa    == plasma_cache_etapa)
+        return;
+
+    uint8_t off = (uint8_t)(g->seed ^ (g->seed >> 16));
+
+    for (int y = 0; y < 80; y++) {
+        for (int x = 0; x < 120; x++) {
+            plasma_cache[y][x] = plasma_pixel(x, y, off, g);
+        }
+    }
+
+    plasma_cache_seed     = g->seed;
+    plasma_cache_quilates = g->quilates;
+    plasma_cache_etapa    = g->etapa;
+}
+
+uint8_t plasma_cache_get(int x, int y)
+{
+    if (x < 0)   x = 0;
+    if (x > 119) x = 119;
+    if (y < 0)   y = 0;
+    if (y > 79)  y = 79;
+    return plasma_cache[y][x];
+}

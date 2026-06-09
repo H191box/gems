@@ -13,8 +13,10 @@ typedef enum {
     VISTA_IMAGEN,
     VISTA_G2,
     VISTA_G2_SUBMENU,
+    VISTA_G2_OBSERVAR,
     VISTA_G3,
-    VISTA_G3_SUBMENU
+    VISTA_G3_SUBMENU,
+    VISTA_G3_OBSERVAR
 } VistaGaleria;
 
 

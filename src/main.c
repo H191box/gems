@@ -69,7 +69,7 @@ int main() {
     // 3. Cargar entorno visual basándose en la ciudad recuperada de la SRAM
     aplicar_paleta_segun_bioma(ciudad_actual_idx);
     dibujar_menu(0);
-    
+    flip();      /* presentar el menú antes del fade */
     fade_in();
     
     

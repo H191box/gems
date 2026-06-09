@@ -44,6 +44,9 @@ uint8_t pixel_chaos(int x, int y, uint8_t off);
 /* Harlequin: bloques geométricos desplazados, patrón más raro        */
 uint8_t pixel_harlequin(int x, int y, uint8_t off);
 
+/* Pinfire: microdestellos iridiscentes dispersos sobre fondo oscuro  */
+uint8_t pixel_pinfire(int x, int y, uint8_t off);
+
 /* ------------------------------------------------------------------ */
 /* API pública principal                                              */
 /* ------------------------------------------------------------------ */
@@ -61,5 +64,23 @@ uint8_t plasma_pixel(int x, int y, uint8_t off, const Gema *g);
  * desplazada. Mezcla conservadora (8:2) para preservar detalle.
  */
 uint8_t plasma_pixel_smooth(int x, int y, uint8_t off, const Gema *g);
+
+/* ------------------------------------------------------------------ */
+/* Caché de plasma base (Fase 3 — optimización de rendimiento)        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * plasma_cache_rebuild()
+ * Precalcula plasma_pixel() para todo el espacio [0,119]x[0,79].
+ * Llamar una vez al cambiar de gema. No recalcula si la gema no cambió.
+ */
+void plasma_cache_rebuild(const Gema *g);
+
+/*
+ * plasma_cache_get()
+ * Devuelve el índice de paleta precalculado para (x, y).
+ * Coste: un acceso a array en IWRAM — ~1 ciclo.
+ */
+extern uint8_t plasma_cache_get(int x, int y);
 
 #endif /* PLASMA_H */

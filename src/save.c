@@ -7,7 +7,7 @@
 #define SRAM_BASE ((uint8_t *)0x0E000000)
 
 #define SAVE_MAGIC    "OPAL"
-#define SAVE_VERSION  11
+#define SAVE_VERSION  12   /* MAX_GALERIA3 ampliado a 32 */
 
 /* ------------------------------------------------------------------ */
 /* TAMAÑO Y OFFSETS SRAM                                              */

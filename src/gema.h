@@ -53,6 +53,7 @@ typedef uint8_t PatronOpalo;  /* Índice en patrones[]     de patron_data.h */
 #define PATRON_MOSAICO   PATRON_ID_MOSAICO
 #define PATRON_CHAOS     PATRON_ID_CHAOS
 #define PATRON_HARLEQUIN PATRON_ID_HARLEQUIN
+#define PATRON_PINFIRE   PATRON_ID_PINFIRE
 
 /* ------------------------------------------------------------------ */
 /* Estructura temporal de ópalo para UI/render                        */
@@ -97,6 +98,22 @@ typedef struct {
 #define GEMA_FLAG_FAVORITA   0x01
 #define GEMA_FLAG_BLOQUEADA  0x02
 #define GEMA_FLAG_GRIETAS    0x04  /* Fallo crítico en pulido — persistente */
+
+/* ------------------------------------------------------------------ */
+/* Suciedad aparente (Fase 2 → Fase 3)                               */
+/*                                                                    */
+/* Análogo a quilates_aparentes: en ETAPA_CORTADA los atributos       */
+/* estéticos (brillo, saturación, iridiscencia) se muestran           */
+/* distorsionados por un nivel de suciedad derivado de la seed.       */
+/* En ETAPA_PULIDA desaparece y se revelan los valores reales.        */
+/*                                                                    */
+/* Niveles: 0 = casi limpia  (+5% desviación)                        */
+/*          1 = sucia        (+15% desviación)                       */
+/*          2 = muy sucia    (+28% desviación)                       */
+/*          3 = lodosa       (+40% desviación)                       */
+/* ------------------------------------------------------------------ */
+
+#define SUCIEDAD_NIVELES  4   /* Número de niveles posibles [0..3] */
 
 /* ------------------------------------------------------------------ */
 /* Entidad persistente principal                                      */
@@ -165,6 +182,22 @@ uint8_t     gema_brillo(const Gema *g);
 uint8_t     gema_pureza(const Gema *g);
 uint8_t     gema_iridiscencia(const Gema *g);
 uint8_t     gema_saturacion(const Gema *g);
+
+uint8_t  gema_sesgo_peso(const Gema *g);
+uint16_t gema_quilates_aparentes(const Gema *g);
+
+/*
+ * gema_suciedad() — nivel de suciedad aparente en Fase 2
+ *
+ * Devuelve un valor en [0, SUCIEDAD_NIVELES) derivado deterministamente
+ * de la seed. Es el análogo directo de gema_sesgo_peso(): un dato
+ * consistente por gema que distorsiona la percepción del jugador
+ * antes de pulir.
+ *
+ * Solo tiene significado semántico en ETAPA_CORTADA. En otras etapas
+ * puede llamarse pero el llamador debe ignorar el resultado.
+ */
+uint8_t gema_suciedad(const Gema *g);
 
 void gema_calcular_atributos(const Gema *g, AtributosGema *out_attr);
 

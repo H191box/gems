@@ -1,0 +1,488 @@
+# PLAN DE OPTIMIZACIÓN DE RENDIMIENTO
+## Proyecto: Gacha de Ópalos GBA
+## Objetivo
+
+Reducir el tiempo de renderizado de la galería y la visualización de ópalos sin degradar la calidad visual.
+
+Prioridad basada en:
+
+- Máxima mejora de FPS.
+- Mínimo riesgo de introducir bugs.
+- Mínimo coste de implementación.
+
+---
+
+# FASE 1 — CACHE DE PREVIEW SELECCIONADA
+## Impacto esperado
+⭐⭐⭐⭐⭐
+
+## Coste
+⭐
+
+## Archivos
+
+- galeria.c
+- gema_render.c
+
+---
+
+## Problema
+
+Actualmente el ópalo grande se vuelve a renderizar cuando se entra en la galería o se navega.
+
+Aunque existe cache interna del render profesional, seguimos recalculando partes de la visualización.
+
+---
+
+## Solución
+
+Crear una cache explícita del preview completo.
+
+Ejemplo:
+
+```c
+static uint16_t preview_cache[120 * 80];
+static uint32_t preview_seed;
+static uint8_t preview_dirty;
+```
+
+Cuando:
+
+- cambia el cursor
+- cambia la gema
+
+se regenera.
+
+En el resto de frames:
+
+```c
+memcpy(...)
+```
+
+directo a VRAM.
+
+---
+
+## Beneficio
+
+El render complejo pasa de:
+
+```text
+Cada frame
+```
+
+a:
+
+```text
+Sólo al cambiar de gema
+```
+
+---
+
+# FASE 2 — MINIATURAS 100% CACHEADAS
+## Impacto esperado
+⭐⭐⭐⭐⭐
+
+## Coste
+⭐⭐
+
+## Archivos
+
+- thumb_cache.c
+- thumb_cache.h
+- galeria.c
+
+---
+
+## Problema
+
+Las miniaturas todavía pueden provocar cálculos procedimentales.
+
+---
+
+## Solución
+
+Al cargar la galería:
+
+```c
+thumb_generar()
+```
+
+para todas las gemas visibles.
+
+Durante navegación:
+
+```c
+thumb_dibujar()
+```
+
+únicamente.
+
+---
+
+## Beneficio
+
+Eliminamos completamente:
+
+```text
+plasma_pixel()
+pixel_matrix()
+pixel_harlequin()
+pixel_pinfire()
+```
+
+de la lista.
+
+---
+
+# FASE 3 — CACHE DE PLASMA BASE
+## Impacto esperado
+⭐⭐⭐⭐⭐
+
+## Coste
+⭐⭐⭐
+
+## Archivos
+
+- plasma.c
+- plasma.h
+- gema_render.c
+
+---
+
+## Problema
+
+Actualmente cada píxel visible llama a:
+
+```c
+plasma_pixel(...)
+```
+
+---
+
+## Solución
+
+Generar:
+
+```c
+uint8_t plasma_cache[80][120];
+```
+
+una sola vez.
+
+Cuando cambia la gema:
+
+```c
+regenerar_cache()
+```
+
+Después:
+
+```c
+color = plasma_cache[y][x];
+```
+
+---
+
+## Beneficio
+
+Desaparecen miles de llamadas por frame.
+
+Esta mejora probablemente sea la más rentable de todo el proyecto.
+
+---
+
+# FASE 4 — MATRIZ DE ESCALADO PRECALCULADA
+## Impacto esperado
+⭐⭐⭐⭐
+
+## Coste
+⭐⭐
+
+## Archivos
+
+- gema_render.c
+
+---
+
+## Problema
+
+Durante el render se realizan divisiones:
+
+```c
+src_x = ...
+src_y = ...
+```
+
+para cada píxel.
+
+Las divisiones son lentas en GBA.
+
+---
+
+## Solución
+
+Precalcular:
+
+```c
+scale_x
+scale_y
+```
+
+una vez.
+
+Usar multiplicación fija:
+
+```c
+src_x = ((x + a) * scale_x) >> 8;
+```
+
+---
+
+## Beneficio
+
+Aceleración inmediata de todos los renders.
+
+---
+
+# FASE 5 — MÁSCARAS ELÍPTICAS PRECALCULADAS
+## Impacto esperado
+⭐⭐⭐⭐
+
+## Coste
+⭐⭐⭐
+
+## Archivos
+
+- gema_render.c
+
+---
+
+## Problema
+
+Cada render realiza:
+
+```c
+dx²*b² + dy²*a² <= a²*b²
+```
+
+miles de veces.
+
+---
+
+## Solución
+
+Generar una máscara binaria:
+
+```c
+ellipse_mask[y][x]
+```
+
+una vez.
+
+Después:
+
+```c
+if(mask[y][x])
+```
+
+---
+
+## Beneficio
+
+Menos multiplicaciones por píxel.
+
+---
+
+# FASE 6 — OPTIMIZACIÓN DEL PATRÓN MATRIX
+## Impacto esperado
+⭐⭐⭐⭐⭐
+
+## Coste
+⭐⭐⭐
+
+## Archivos
+
+- plasma.c
+
+---
+
+## Problema
+
+Todo apunta a que Matrix es actualmente el patrón más caro.
+
+Posibles causas:
+
+- hashes repetidos
+- ruido procedural
+- varias capas de cálculo
+
+---
+
+## Solución
+
+Crear:
+
+```c
+pixel_matrix_fast()
+```
+
+para:
+
+- miniaturas
+- previews
+
+Mantener:
+
+```c
+pixel_matrix()
+```
+
+sólo para render profesional.
+
+---
+
+## Beneficio
+
+Los ópalos Matrix dejarán de producir caídas de FPS.
+
+---
+
+# FASE 7 — SEPARACIÓN DE CAPAS DE GALERÍA
+## Impacto esperado
+⭐⭐⭐
+
+## Coste
+⭐⭐⭐⭐
+
+## Archivos
+
+- galeria.c
+- video.c
+
+---
+
+## Problema
+
+La galería redibuja demasiadas cosas estáticas.
+
+---
+
+## Solución
+
+Crear:
+
+### Capa fija
+
+- fondo
+- marcos
+- textos permanentes
+
+### Capa dinámica
+
+- cursor
+- dinero
+- ópalo seleccionado
+
+---
+
+## Beneficio
+
+Menos escrituras a VRAM.
+
+---
+
+# FASE 8 — PERFILADO REAL DE PATRONES
+## Impacto esperado
+⭐⭐⭐⭐⭐
+
+## Coste
+⭐
+
+## Archivos
+
+- plasma.c
+
+---
+
+## Objetivo
+
+Medir qué patrón consume más CPU.
+
+---
+
+## Añadir contador
+
+```c
+static uint32_t tiempo_matrix;
+static uint32_t tiempo_harlequin;
+static uint32_t tiempo_pinfire;
+static uint32_t tiempo_nebula;
+```
+
+o contar llamadas.
+
+---
+
+## Resultado esperado
+
+Identificar exactamente:
+
+```text
+Matrix      45%
+Harlequin   18%
+Pinfire     12%
+Nebula      10%
+...
+```
+
+y optimizar donde realmente importa.
+
+---
+
+# ORDEN RECOMENDADO DE IMPLEMENTACIÓN
+
+## Sprint 1 (máximo beneficio inmediato)
+
+1. Cache preview seleccionada.
+2. Miniaturas 100% cacheadas.
+3. Perfilado de patrones.
+
+---
+
+## Sprint 2
+
+4. Cache de plasma base.
+5. Escalado precalculado.
+
+---
+
+## Sprint 3
+
+6. Matrix Fast.
+7. Máscaras elípticas.
+
+---
+
+## Sprint 4
+
+8. Separación de capas de galería.
+
+---
+
+# EXPECTATIVA REALISTA
+
+Aplicando únicamente:
+
+- Fase 1
+- Fase 2
+- Fase 3
+- Fase 4
+
+es razonable esperar una reducción de carga CPU del:
+
+```text
+60% - 85%
+```
+
+durante navegación por galería y visualización de ópalos.

@@ -3,7 +3,7 @@
 #include <string.h>
 #include <gba_video.h>
 #include <gba_input.h>
-
+#include <stdlib.h>
 #include "galeria.h"
 #include "save.h"
 #include "plasma.h"
@@ -24,9 +24,6 @@
 #define LIST_W       115
 #define LIST_ITEM_H   14
 #define LIST_ITEMS     8
-
-#define THUMB_X      125
-#define THUMB_Y       18
 
 // ============================================================
 // TIPOS
@@ -56,11 +53,15 @@ static int   opcion_submenu;
 static Gema  g2_items[MAX_GALERIA2];
 static int   g2_num;
 static int   g2_cursor;
+static int   g2_scroll;
+static int   g2_submenu;
 
 // G3
 static Gema  g3_items[MAX_GALERIA3];
 static int   g3_num;
 static int   g3_cursor;
+static int   g3_scroll;
+static int   g3_submenu;
 
 extern uint8_t grieta_buf[160][240];
 
@@ -72,38 +73,24 @@ static void limpiar_buffer_render(void) {
 // HELPERS PALETA
 // ============================================================
 
-// Escribe la paleta UI base.
-// REGLA: llamar SIEMPRE justo antes de flip_no_vsync(), nunca
-// en medio del render ni desde subfunciones. Un único punto de
-// escritura por frame elimina los flashes de paleta.
 static void init_paleta_ui(void)
 {
     volatile uint16_t* pal = (volatile uint16_t*)0x05000000;
 
-    // Índice 0: backdrop de la GBA. Lo igualamos al beige oscuro del fondo
-    // para que el hardware no muestre negro en los bordes del modo 4.
-    pal[0]   = 27 | (25 << 5) | (21 << 10); // beige oscuro (mismo que IDX_FONDO_OSCURO)
-    pal[1]   = 0x294A; // Fondo de items (Gris azulado oscuro)
-    pal[2]   = 0x681F; // Color de selección (Verde/Azul brillante)
-    pal[3]   = 0x4210; // Líneas de división (Gris oscuro)
-    pal[4]   = 0x6810; // Barra superior
+    pal[0]   = 27 | (25 << 5) | (21 << 10);
+    pal[1]   = 0x294A;
+    pal[2]   = 0x681F;
+    pal[3]   = 0x4210;
+    pal[4]   = 0x6810;
+    pal[5]   = 27 | (25 << 5) | (21 << 10);
+    pal[6]   = 30 | (29 << 5) | (25 << 10);
 
-    // Índices 5 y 6: dithering del fondo (render.c los usa como IDX_FONDO_OSCURO/CLARO)
-    pal[5]   = 27 | (25 << 5) | (21 << 10); // IDX_FONDO_OSCURO — beige oscuro
-    pal[6]   = 30 | (29 << 5) | (25 << 10); // IDX_FONDO_CLARO  — beige claro
-
-    // 7-14: libres, a cero
-    for (int i = 7; i <= 14; i++) {
+    for (int i = 7; i <= 14; i++)
         pal[i] = 0x0000;
-    }
 
-    // 15: borde de gema (lo deja generar_paleta_gema; aquí ponemos un valor neutro
-    // que no cause flash si se muestra antes de que generar_paleta_gema lo sobrescriba)
     pal[15]  = 0x7FFF;
-
-    // 254-255: brillo/texto — coherentes con generar_paleta_gema
-    pal[254] = 0x7FFF; // Blanco (destello 3D de la preview)
-    pal[255] = 0x7FFF; // Blanco para fuentes/texto
+    pal[254] = 0x7FFF;
+    pal[255] = 0x7FFF;
 }
 
 static void clear_vram(uint16_t* vram)
@@ -125,45 +112,6 @@ static const char* NOMBRE_TIPO[6] = {
 };
 
 // ============================================================
-// NUEVAS ACCIONES DE GESTIÓN DE GEMAS (G1)
-// ============================================================
-
-static void mover_a_vitrina(int idx)
-{
-    if (num_items <= 0 || idx < 0 || idx >= num_items) return;
-    if (g2_num >= MAX_GALERIA2) return;
-
-    guardar_gema_galeria2(&items[idx]);
-
-    g2_items[g2_num] = items[idx];
-    g2_num++;
-
-    for (int i = idx; i < num_items - 1; i++) {
-        actualizar_gema_en_sram(i, &items[i + 1]);
-        items[i] = items[i + 1];
-    }
-
-    decrementar_num_gemas();
-    num_items--;
-
-    if (cursor >= num_items && cursor > 0)
-        cursor = num_items - 1;
-    if (scroll > 0 && scroll + LIST_ITEMS > num_items)
-        scroll--;
-    if (scroll < 0) scroll = 0;
-}
-
-static void evolucionar_gema(int idx)
-{
-    if (num_items <= 0 || idx < 0 || idx >= num_items) return;
-
-    if (items[idx].etapa < ETAPA_PULIDA) {
-        items[idx].etapa++;
-        actualizar_gema_en_sram(idx, &items[idx]);
-    }
-}
-
-// ============================================================
 // HELPERS VALOR
 // ============================================================
 
@@ -172,50 +120,255 @@ static uint32_t valor_gema(int idx_g1)
     return gema_valor_estimado(&items[idx_g1]);
 }
 
+static uint32_t valor_g2(int idx)
+{
+    return gema_valor_estimado(&g2_items[idx]);
+}
+
 static uint32_t valor_g3(int idx)
 {
     return gema_valor_estimado(&g3_items[idx]);
 }
 
 // ============================================================
-// RENDER THUMB (G1)
-// Renderiza la preview de la gema al buffer software y la vuelca
-// sobre el back buffer. No toca la paleta — eso lo hace render_lista()
-// justo antes del flip.
+// ORDENAR G3
 // ============================================================
-static void render_thumb(int idx)
+
+static void ordenar_g3(void)
+{
+    for (int i = 0; i < g3_num - 1; i++) {
+        for (int j = 0; j < g3_num - 1 - i; j++) {
+            if (gema_valor_estimado(&g3_items[j]) < gema_valor_estimado(&g3_items[j + 1])) {
+                Gema tmp      = g3_items[j];
+                g3_items[j]   = g3_items[j + 1];
+                g3_items[j+1] = tmp;
+            }
+        }
+    }
+    for (int i = 0; i < g3_num; i++)
+        actualizar_gema_galeria3(i, &g3_items[i]);
+}
+
+// ============================================================
+// ACCIONES G1
+// ============================================================
+
+static void mover_a_vitrina(int idx)
+{
+    if (num_items <= 0 || idx < 0 || idx >= num_items) return;
+    if (g2_num >= MAX_GALERIA2) return;
+
+    guardar_gema_galeria2(&items[idx]);
+    g2_items[g2_num] = items[idx];
+    g2_num++;
+
+    for (int i = idx; i < num_items - 1; i++) {
+        actualizar_gema_en_sram(i, &items[i + 1]);
+        items[i] = items[i + 1];
+    }
+    decrementar_num_gemas();
+    num_items--;
+
+    if (cursor >= num_items && cursor > 0) cursor = num_items - 1;
+    if (scroll > 0 && scroll + LIST_ITEMS > num_items) scroll--;
+    if (scroll < 0) scroll = 0;
+}
+
+static void evolucionar_gema(int idx)
+{
+    if (num_items <= 0 || idx < 0 || idx >= num_items) return;
+
+    if (items[idx].etapa == ETAPA_BRUTA) {
+        // Fase 1 -> Fase 2: Cortar (100% seguro)
+        gema_cortar(&items[idx]);
+        actualizar_gema_en_sram(idx, &items[idx]);
+    } 
+    else if (items[idx].etapa == ETAPA_CORTADA) {
+        // Fase 2 -> Fase 3: Pulir (20% de riesgo de grietas)
+        uint8_t dado = (uint8_t)(rand() % 100);
+        uint8_t umbral_fallo = 20; // 20% de probabilidad de fallo
+        
+        // gema_pulir cambia la etapa a ETAPA_PULIDA e inyecta 
+        // el FLAG_GRIETAS si el dado cae por debajo de 20
+        gema_pulir(&items[idx], dado, umbral_fallo);
+        actualizar_gema_en_sram(idx, &items[idx]);
+    }
+}
+static void vender_item_seleccionado(int idx)
+{
+    if (idx < 0 || idx >= num_items) return;
+
+    uint32_t val = valor_gema(idx);
+    modificar_dinero((int32_t)val);
+
+    if (g3_num >= MAX_GALERIA3) {
+        uint32_t valor_nueva  = gema_valor_estimado(&items[idx]);
+        uint32_t valor_ultima = gema_valor_estimado(&g3_items[g3_num - 1]);
+        if (valor_nueva > valor_ultima) {
+            actualizar_gema_galeria3(g3_num - 1, &items[idx]);
+            g3_items[g3_num - 1] = items[idx];
+            ordenar_g3();
+        }
+    } else {
+        guardar_gema_galeria3(&items[idx]);
+        g3_items[g3_num] = items[idx];
+        g3_num++;
+        ordenar_g3();
+    }
+
+    for (int i = idx; i < num_items - 1; i++) {
+        actualizar_gema_en_sram(i, &items[i + 1]);
+        items[i] = items[i + 1];
+    }
+    decrementar_num_gemas();
+    num_items--;
+
+    if (cursor >= num_items && cursor > 0) cursor--;
+    if (cursor < scroll) scroll = cursor;
+    if (scroll + LIST_ITEMS > num_items && num_items > LIST_ITEMS)
+        scroll = num_items - LIST_ITEMS;
+    if (scroll < 0) scroll = 0;
+}
+
+// ============================================================
+// ACCIONES G2
+// ============================================================
+
+static void devolver_a_g1(int idx)
+{
+    if (idx < 0 || idx >= g2_num) return;
+
+    guardar_gema(&g2_items[idx]);
+
+    for (int i = idx; i < g2_num - 1; i++) {
+        actualizar_gema_galeria2(i, &g2_items[i + 1]);
+        g2_items[i] = g2_items[i + 1];
+    }
+    decrementar_num_gemas_galeria2();
+    g2_num--;
+
+    if (g2_cursor >= g2_num && g2_cursor > 0) g2_cursor--;
+    if (g2_scroll > 0 && g2_scroll + LIST_ITEMS > g2_num) g2_scroll--;
+    if (g2_scroll < 0) g2_scroll = 0;
+}
+
+// ============================================================
+// ACCIONES G3
+// ============================================================
+
+static void comprar_desde_g3(int idx)
+{
+    if (idx < 0 || idx >= g3_num) return;
+
+    uint32_t val    = valor_g3(idx);
+    uint32_t dinero = obtener_dinero();
+    if (dinero < val) return;
+
+    modificar_dinero(-(int32_t)val);
+    guardar_gema(&g3_items[idx]);
+
+    for (int i = idx; i < g3_num - 1; i++) {
+        actualizar_gema_galeria3(i, &g3_items[i + 1]);
+        g3_items[i] = g3_items[i + 1];
+    }
+    decrementar_num_gemas_galeria3();
+    g3_num--;
+
+    if (g3_cursor >= g3_num && g3_cursor > 0) g3_cursor--;
+    if (g3_scroll > 0 && g3_scroll + LIST_ITEMS > g3_num) g3_scroll--;
+    if (g3_scroll < 0) g3_scroll = 0;
+}
+
+// ============================================================
+// HELPER RENDER THUMB — reutilizado por las 3 galerías
+// Renderiza la preview de una gema al cuadrante superior derecho.
+// ============================================================
+
+static void render_thumb_gema(const Gema* g)
 {
     limpiar_buffer_render();
 
-    if (items[idx].etapa > ETAPA_PULIDA)
+    if (g->etapa > ETAPA_PULIDA)
         return;
 
-    // MATEMÁTICAS: Centro exacto del cuadrante superior derecho
-    // Cuadrante: X[120-240], Y[0-80] -> Centro: X=180, Y=40
-    int x_centrado = 180;
-    int y_centrado = 40;
-
-    // renderizar_gema_preview() renderiza al anim_buf_a y 
-    // llama a volcar_buf_solo_opalo() internamente.
-    renderizar_gema_preview(x_centrado, y_centrado, &items[idx]);
+    plasma_cache_rebuild(g);
+    generar_paleta_gema(g);
+    renderizar_gema_preview(180, 40, g);
 }
+
+// ============================================================
+// RENDER FICHA G1
+// ============================================================
+
+static void render_ficha(int idx)
+{
+    uint16_t* vram = get_vram();
+
+    for (int y = 0; y < 160; y++)
+        for (int x = 0; x < LIST_W; x += 2)
+            vram[(y * 120) + (x / 2)] = 0;
+
+    int y = 20;
+    char buf[40];
+
+    draw_text(vram, 5, y, "FICHA TECNICA", 255); y += 20;
+
+    int t = (int)gema_tipo(&items[idx]);
+    if (t < 0 || t >= NUM_TIPOS_OPALO) t = 0;
+    draw_text(vram, 5, y, (char*)NOMBRE_TIPO[t], 255); y += 14;
+
+    // AUDITORÍA DE BRILLO: Calculamos los atributos percibidos para evitar fugas de información
+    AtributosGema attr;
+    gema_calcular_atributos(&items[idx], &attr);
+
+    // CORREGIDO: Ahora muestra el brillo aparente (con sesgo) en lugar del brillo real de la semilla
+    sprintf(buf, "BRILLO: %d", attr.brillo_aparente);
+    draw_text(vram, 5, y, buf, 255); y += 12;
+
+    sprintf(buf, "PUREZA: %d", gema_pureza(&items[idx]));
+    draw_text(vram, 5, y, buf, 255); y += 12;
+
+    // SISTEMA DE PESO APARENTE: Se mantiene tu cambio con la función al vuelo
+    sprintf(buf, "PESO: %d K", gema_quilates_aparentes(&items[idx]));
+    draw_text(vram, 5, y, buf, 255); y += 12;
+    
+    sprintf(buf, "VALOR: %u", (unsigned int)valor_gema(idx));
+    draw_text(vram, 5, y, buf, 255);
+
+    draw_text(vram, 5, 140, "B: VOLVER", 255);
+}
+
+// ============================================================
+// RENDER OBSERVAR — pantalla completa bloqueante (G2 y G3)
+// ============================================================
+
+static void render_observar(const Gema* g)
+{
+    uint8_t* buf = get_anim_buf_b();
+
+    plasma_cache_rebuild(g);
+
+renderizar_opalo_pro(buf, 240, 160, g);
+
+    vsync_only();
+    generar_paleta_gema(g);
+    dibujar_fondo_texturizado_optimizado(get_vram(), 0);
+    volcar_buf_solo_opalo(buf, 0);
+
+    draw_text(get_vram(), 2, 150, "B: VOLVER", 255);
+    flip_no_vsync();
+}
+
 // ============================================================
 // RENDER LISTA G1
-// Orden estable:
-//   1. Todo el contenido al back buffer (VRAM)
-//   2. vsync_only()        — esperamos VBlank
-//   3. init_paleta_ui()    — paleta en VBlank, cero flash
-//   4. flip_no_vsync()     — page swap atómico con la paleta
 // ============================================================
+
 static void render_lista(void)
 {
     uint16_t* vram = get_vram();
     limpiar_buffer_render();
 
-    // --- 1. CONTENIDO AL BACK BUFFER ---
-
     dibujar_fondo_texturizado_optimizado(vram, 0);
-
     fill_rect(vram, 0, 0, 240, 12, 4);
     draw_text(vram, 4, 2, "GALERIA 1  L/R:CAMBIAR", 255);
 
@@ -228,8 +381,6 @@ static void render_lista(void)
         draw_text(vram, 10, 70, "GALERIA VACIA", 255);
         draw_text(vram, 10, 85, "USA EL TALLER", 255);
         draw_text(vram, 0, 152, "ARR/ABA:MOVER  START:MENU", 255);
-        
-        // --- 2-4. PALETA + FLIP (Caso vacío) ---
         vsync_only();
         init_paleta_ui();
         flip_no_vsync();
@@ -269,8 +420,7 @@ static void render_lista(void)
         draw_text(vram, LIST_W / 2 - 4, 150, "v", 255);
 
     if (cursor < num_items) {
-        // render_thumb vuelca al back buffer usando volcar_buf_solo_opalo()
-        render_thumb(cursor);
+        render_thumb_gema(&items[cursor]);
 
         int x = LIST_W + 4;
         int y = 105;
@@ -292,8 +442,12 @@ static void render_lista(void)
             sprintf(buf, "VALOR: %u", (unsigned int)valor_gema(cursor));
             draw_text(vram, x, y, buf, 255); y += 14;
         } else {
+            // FASE 1 (ETAPA_BRUTA): Muestra los datos sin identificar con el peso sesgado
             draw_text(vram, x, y, "SIN IDENTIFICAR", 255); y += 14;
-            sprintf(buf, "PESO: %d", items[cursor].quilates);
+            
+            // MODIFICACIÓN: Cambiado items[cursor].quilates por gema_quilates_aparentes
+            sprintf(buf, "PESO: %d", gema_quilates_aparentes(&items[cursor]));
+            
             draw_text(vram, x, y, buf, 255); y += 12;
             sprintf(buf, "VALOR: %u", (unsigned int)valor_gema(cursor));
             draw_text(vram, x, y, buf, 255); y += 14;
@@ -314,280 +468,232 @@ static void render_lista(void)
                   opcion_submenu == 0 ? "> VER FICHA" : "  VER FICHA", 255);
 
         char txt_evolucion[20];
-        if (items[cursor].etapa == ETAPA_BRUTA) {
+        if (items[cursor].etapa == ETAPA_BRUTA)
             sprintf(txt_evolucion, "%s", opcion_submenu == 1 ? "> CORTAR" : "  CORTAR");
-        } else if (items[cursor].etapa == ETAPA_CORTADA) {
+        else if (items[cursor].etapa == ETAPA_CORTADA)
             sprintf(txt_evolucion, "%s", opcion_submenu == 1 ? "> PULIR" : "  PULIR");
-        } else {
+        else
             sprintf(txt_evolucion, "%s", opcion_submenu == 1 ? "> MAX EVOL" : "  MAX EVOL");
-        }
         draw_text(vram, sm_x + 6, sm_y + 20, txt_evolucion, 255);
 
         draw_text(vram, sm_x + 6, sm_y + 34,
                   opcion_submenu == 2 ? "> A VITRINA" : "  A VITRINA", 255);
-
         draw_text(vram, sm_x + 6, sm_y + 48,
                   opcion_submenu == 3 ? "> VENDER" : "  VENDER", 255);
     }
 
     draw_text(vram, 0, 152, "ARR/ABA:MOVER  START:MENU", 255);
 
-    // --- 2-4. PALETA + FLIP ---
-    // Todo el contenido está ya en el back buffer. Ahora, en VBlank,
-    // escribimos la paleta y hacemos el page swap de forma atómica.
     vsync_only();
     init_paleta_ui();
-
-    // CORRECCIÓN: Cargamos los colores procedurales del ópalo seleccionado en Palette RAM
-    if (num_items > 0 && cursor < num_items) {
+    if (num_items > 0 && cursor < num_items)
         generar_paleta_gema(&items[cursor]);
-    }
-
     flip_no_vsync();
 }
-
 // ============================================================
-// RENDER FICHA
+// RENDER LISTA G2 (Vitrina) — misma UI que G1
 // ============================================================
-
-static void render_ficha(int idx)
-{
-    uint16_t* vram = get_vram();
-
-    for (int y = 0; y < 160; y++)
-        for (int x = 0; x < LIST_W; x += 2)
-            vram[(y * 120) + (x / 2)] = 0;
-
-    int y = 20;
-    char buf[40];
-
-    draw_text(vram, 5, y, "FICHA TECNICA", 255); y += 20;
-
-    int t = (int)gema_tipo(&items[idx]);
-    if (t < 0 || t >= NUM_TIPOS_OPALO) t = 0;
-    draw_text(vram, 5, y, (char*)NOMBRE_TIPO[t], 255); y += 14;
-
-    sprintf(buf, "BRILLO: %d", gema_brillo(&items[idx]));
-    draw_text(vram, 5, y, buf, 255); y += 12;
-
-    sprintf(buf, "PUREZA: %d", gema_pureza(&items[idx]));
-    draw_text(vram, 5, y, buf, 255); y += 12;
-
-    sprintf(buf, "PESO: %d K", items[idx].quilates);
-    draw_text(vram, 5, y, buf, 255); y += 12;
-
-    sprintf(buf, "VALOR: %u", (unsigned int)valor_gema(idx));
-    draw_text(vram, 5, y, buf, 255);
-
-    draw_text(vram, 5, 140, "B: VOLVER", 255);
-
-    // render_ficha no hace flip propio: render_lista() ya lo hizo antes
-    // y render_ficha solo pinta la zona izquierda encima del mismo back buffer.
-    // El flip definitivo lo hace galeria_input() tras render_lista() + render_ficha().
-}
-
-// ============================================================
-// VENDER G1 -> G3
-// ============================================================
-
-static void vender_item_seleccionado(int idx)
-{
-    if (idx < 0 || idx >= num_items) return;
-
-    uint32_t valor = valor_gema(idx);
-    modificar_dinero((int32_t)valor);
-
-    guardar_gema_galeria3(&items[idx]);
-
-    for (int i = idx; i < num_items - 1; i++) {
-        actualizar_gema_en_sram(i, &items[i + 1]);
-        items[i] = items[i + 1];
-    }
-    decrementar_num_gemas();
-    num_items--;
-
-    if (cursor >= num_items && cursor > 0) cursor--;
-    if (cursor < scroll) scroll = cursor;
-    if (scroll + LIST_ITEMS > num_items && num_items > LIST_ITEMS)
-        scroll = num_items - LIST_ITEMS;
-    if (scroll < 0) scroll = 0;
-}
-
-// ============================================================
-// RENDER G2 (Vitrina)
-// ============================================================
-
-#define G2_COLS     3
-#define G2_CELL_W  72
-#define G2_CELL_H  46
-#define G2_OX       8
-#define G2_OY      16
 
 static void render_g2(void)
 {
     uint16_t* vram = get_vram();
+    limpiar_buffer_render();
 
     dibujar_fondo_texturizado_optimizado(vram, 0);
-
     fill_rect(vram, 0, 0, 240, 12, 4);
-    draw_text(vram, 4, 2, "GALERIA 2  L/R:CAMBIAR", 255);
+    draw_text(vram, 4, 2, "VITRINA  L/R:CAMBIAR", 255);
+
+    char txt_dinero[20];
+    sprintf(txt_dinero, "ORO:%d", obtener_dinero());
+    draw_text(vram, 170, 2, txt_dinero, 255);
+    vline(vram, LIST_W, 12, 148, 3);
 
     if (g2_num == 0) {
         draw_text(vram, 10, 70, "VITRINA VACIA", 255);
-        draw_text(vram, 0, 152, "CURSOR:MOVER  START:MENU", 255);
+        draw_text(vram, 10, 85, "MUEVE DESDE G1", 255);
+        draw_text(vram, 0, 152, "ARR/ABA:MOVER  START:MENU", 255);
         vsync_only();
         init_paleta_ui();
         flip_no_vsync();
         return;
     }
 
-    for (int i = 0; i < g2_num; i++) {
-        int col = i % G2_COLS;
-        int row = i / G2_COLS;
+    for (int i = 0; i < LIST_ITEMS; i++) {
+        int idx = g2_scroll + i;
+        if (idx >= g2_num) break;
 
-        /* Centro exacto de la celda — renderizar_opalo_pequeno_celda
-         * usa x_pos/y_pos como centro del cabujón, no como esquina. */
-        int cx = G2_OX + col * G2_CELL_W + G2_CELL_W / 2;
-        int cy = G2_OY + row * G2_CELL_H + G2_CELL_H / 2;
+        int y      = 13 + i * LIST_ITEM_H;
+        uint8_t bg = (idx == g2_cursor) ? 2 : 1;
+        fill_rect(vram, 0, y, LIST_W - 1, LIST_ITEM_H - 1, bg);
 
-        /* Marco de selección alrededor de la celda completa */
-        if (i == g2_cursor) {
-            int fx = G2_OX + col * G2_CELL_W;
-            int fy = G2_OY + row * G2_CELL_H;
-            fill_rect(vram, fx, fy, G2_CELL_W - 2, G2_CELL_H - 2, 2);
-        }
+        char num[4] = "XX.";
+        num[0] = '0' + ((idx + 1) / 10);
+        num[1] = '0' + ((idx + 1) % 10);
+        draw_text(vram, 2, y + 3, num, 255);
 
-        /* Banco de paleta exclusivo para cada gema: 16 colores por slot */
-        int num_colores = 16;
-        int base_paleta = 16 + (i * num_colores);
+        int t = (int)gema_tipo(&g2_items[idx]);
+        if (t < 0 || t >= 6) t = 0;
 
-        renderizar_gema_celda(cx, cy, &g2_items[i], base_paleta, num_colores);
+        char etiqueta[24];
+        if (g2_items[idx].etapa == ETAPA_PULIDA)
+            sprintf(etiqueta, "%s", NOMBRE_TIPO[t]);
+        else if (g2_items[idx].etapa == ETAPA_CORTADA)
+            sprintf(etiqueta, "CABUJON %s", NOMBRE_TIPO[t]);
+        else
+            sprintf(etiqueta, "RAW %s", NOMBRE_TIPO[t]);
+
+        draw_text(vram, 20, y + 3, etiqueta, 255);
     }
 
-    draw_text(vram, 0, 152, "CURSOR:MOVER  START:MENU", 255);
+    if (g2_scroll > 0)
+        draw_text(vram, LIST_W / 2 - 4, 13, "^", 255);
+    if (g2_scroll + LIST_ITEMS < g2_num)
+        draw_text(vram, LIST_W / 2 - 4, 150, "v", 255);
+
+    if (g2_cursor < g2_num) {
+        render_thumb_gema(&g2_items[g2_cursor]);
+
+        int x = LIST_W + 4;
+        int y = 105;
+        char buf[24];
+
+        int t = (int)gema_tipo(&g2_items[g2_cursor]);
+        if (t < 0 || t >= 6) t = 0;
+
+        draw_text(vram, x, y, (char*)NOMBRE_TIPO[t], 255); y += 12;
+        sprintf(buf, "QUILATES: %d", g2_items[g2_cursor].quilates);
+        draw_text(vram, x, y, buf, 255); y += 12;
+        sprintf(buf, "VALOR: %u", (unsigned int)valor_g2(g2_cursor));
+        draw_text(vram, x, y, buf, 255); y += 14;
+        draw_text(vram, x, y, "A:OPCIONES", 255);
+    }
+
+    if (vista == VISTA_G2_SUBMENU && g2_num > 0) {
+        int sm_x = LIST_W + 6;
+        int sm_y = 82;
+        int sm_w = 113;
+        int sm_h = 40;
+        fill_rect(vram, sm_x, sm_y, sm_w, sm_h, 3);
+        fill_rect(vram, sm_x + 2, sm_y + 2, sm_w - 4, sm_h - 4, 5);
+
+        draw_text(vram, sm_x + 6, sm_y + 6,
+                  g2_submenu == 0 ? "> OBSERVAR"    : "  OBSERVAR",    255);
+        draw_text(vram, sm_x + 6, sm_y + 20,
+                  g2_submenu == 1 ? "> DEVOLVER G1" : "  DEVOLVER G1", 255);
+    }
+
+    draw_text(vram, 0, 152, "ARR/ABA:MOVER  START:MENU", 255);
 
     vsync_only();
     init_paleta_ui();
-
-    /* Cargar paleta de cada gema en su banco asignado dentro de PALRAM */
-    for (int i = 0; i < g2_num; i++) {
-        int base_paleta = 16 + (i * 16);
-        generar_paleta_gema_rango(&g2_items[i], base_paleta, 16);
-    }
-
+    if (g2_num > 0 && g2_cursor < g2_num)
+        generar_paleta_gema(&g2_items[g2_cursor]);
     flip_no_vsync();
 }
 
 // ============================================================
-// RENDER G3 (Mercado)
+// RENDER LISTA G3 (Mercado) — misma UI que G1
 // ============================================================
-
-#define G3_COLS     3
-#define G3_CELL_W  72
-#define G3_CELL_H  46
-#define G3_OX       8
-#define G3_OY      16
 
 static void render_g3(void)
 {
     uint16_t* vram = get_vram();
+    limpiar_buffer_render();
 
     dibujar_fondo_texturizado_optimizado(vram, 0);
-
     fill_rect(vram, 0, 0, 240, 12, 4);
     draw_text(vram, 4, 2, "MERCADO  L/R:CAMBIAR", 255);
 
     char txt_dinero[20];
     sprintf(txt_dinero, "ORO:%d", obtener_dinero());
     draw_text(vram, 170, 2, txt_dinero, 255);
+    vline(vram, LIST_W, 12, 148, 3);
 
     if (g3_num == 0) {
         draw_text(vram, 10, 60, "MERCADO VACIO", 255);
         draw_text(vram, 10, 75, "VENDE DESDE G1", 255);
-        draw_text(vram, 0, 152, "A:COMPRAR  START:MENU", 255);
+        draw_text(vram, 0, 152, "ARR/ABA:MOVER  START:MENU", 255);
         vsync_only();
         init_paleta_ui();
         flip_no_vsync();
         return;
     }
 
-    for (int i = 0; i < g3_num; i++) {
-        int col = i % G3_COLS;
-        int row = i / G3_COLS;
+    for (int i = 0; i < LIST_ITEMS; i++) {
+        int idx = g3_scroll + i;
+        if (idx >= g3_num) break;
 
-        /* Centro exacto de la celda */
-        int cx = G3_OX + col * G3_CELL_W + G3_CELL_W / 2;
-        int cy = G3_OY + row * G3_CELL_H + G3_CELL_H / 2;
+        int y      = 13 + i * LIST_ITEM_H;
+        uint8_t bg = (idx == g3_cursor) ? 2 : 1;
+        fill_rect(vram, 0, y, LIST_W - 1, LIST_ITEM_H - 1, bg);
 
-        if (i == g3_cursor) {
-            int fx = G3_OX + col * G3_CELL_W;
-            int fy = G3_OY + row * G3_CELL_H;
-            fill_rect(vram, fx, fy, G3_CELL_W - 2, G3_CELL_H - 2, 2);
-        }
+        char num[4] = "XX.";
+        num[0] = '0' + ((idx + 1) / 10);
+        num[1] = '0' + ((idx + 1) % 10);
+        draw_text(vram, 2, y + 3, num, 255);
 
-        int num_colores = 16;
-        int base_paleta = 16 + (i * num_colores);
+        int t = (int)gema_tipo(&g3_items[idx]);
+        if (t < 0 || t >= 6) t = 0;
 
-        renderizar_gema_celda(cx, cy, &g3_items[i], base_paleta, num_colores);
+        draw_text(vram, 20, y + 3, (char*)NOMBRE_TIPO[t], 255);
     }
+
+    if (g3_scroll > 0)
+        draw_text(vram, LIST_W / 2 - 4, 13, "^", 255);
+    if (g3_scroll + LIST_ITEMS < g3_num)
+        draw_text(vram, LIST_W / 2 - 4, 150, "v", 255);
 
     if (g3_cursor < g3_num) {
+        render_thumb_gema(&g3_items[g3_cursor]);
+
+        int x = LIST_W + 4;
+        int y = 105;
         char buf[24];
+
         int t = (int)gema_tipo(&g3_items[g3_cursor]);
-        if (t < 0 || t >= NUM_TIPOS_OPALO) t = 0;
-        draw_text(vram, 4, 130, (char*)NOMBRE_TIPO[t], 255);
+        if (t < 0 || t >= 6) t = 0;
+
+        draw_text(vram, x, y, (char*)NOMBRE_TIPO[t], 255); y += 12;
+        sprintf(buf, "QUILATES: %d", g3_items[g3_cursor].quilates);
+        draw_text(vram, x, y, buf, 255); y += 12;
         sprintf(buf, "PRECIO: %u", (unsigned int)valor_g3(g3_cursor));
-        draw_text(vram, 4, 142, buf, 255);
+        draw_text(vram, x, y, buf, 255); y += 14;
+        draw_text(vram, x, y, "A:OPCIONES", 255);
     }
 
-    draw_text(vram, 0, 152, "A:COMPRAR  START:MENU", 255);
+    if (vista == VISTA_G3_SUBMENU && g3_num > 0) {
+        int sm_x = LIST_W + 6;
+        int sm_y = 82;
+        int sm_w = 113;
+        int sm_h = 40;
+        fill_rect(vram, sm_x, sm_y, sm_w, sm_h, 3);
+        fill_rect(vram, sm_x + 2, sm_y + 2, sm_w - 4, sm_h - 4, 5);
+
+        draw_text(vram, sm_x + 6, sm_y + 6,
+                  g3_submenu == 0 ? "> COMPRAR"  : "  COMPRAR",  255);
+        draw_text(vram, sm_x + 6, sm_y + 20,
+                  g3_submenu == 1 ? "> OBSERVAR" : "  OBSERVAR", 255);
+    }
+
+    draw_text(vram, 0, 152, "ARR/ABA:MOVER  START:MENU", 255);
 
     vsync_only();
     init_paleta_ui();
-
-    /* Cargar paleta de cada gema en su banco asignado dentro de PALRAM */
-    for (int i = 0; i < g3_num; i++) {
-        int base_paleta = 16 + (i * 16);
-        generar_paleta_gema_rango(&g3_items[i], base_paleta, 16);
-    }
-
+    if (g3_num > 0 && g3_cursor < g3_num)
+        generar_paleta_gema(&g3_items[g3_cursor]);
     flip_no_vsync();
 }
 
 // ============================================================
-// COMPRAR DESDE G3 -> G1
-// ============================================================
-
-static void comprar_desde_g3(int idx)
-{
-    if (idx < 0 || idx >= g3_num) return;
-
-    uint32_t valor  = valor_g3(idx);
-    uint32_t dinero = obtener_dinero();
-    if (dinero < valor) return;
-
-    modificar_dinero(-(int32_t)valor);
-
-    guardar_gema(&g3_items[idx]);
-
-    for (int i = idx; i < g3_num - 1; i++) {
-        actualizar_gema_galeria3(i, &g3_items[i + 1]);
-        g3_items[i] = g3_items[i + 1];
-    }
-    decrementar_num_gemas_galeria3();
-    g3_num--;
-
-    if (g3_cursor >= g3_num && g3_cursor > 0) g3_cursor--;
-}
-
-// ============================================================
-// CAMBIAR GALERÍA
+// CAMBIAR GALERÍA — con fade para ocultar la carga
 // ============================================================
 
 static void cambiar_galeria(int dir)
 {
     int next = ((int)galeria_activa + dir + 3) % 3;
     galeria_activa = (GaleriaID)next;
+
+    fade_out();
 
     switch (galeria_activa) {
         case GAL_G1:
@@ -598,17 +704,20 @@ static void cambiar_galeria(int dir)
             break;
         case GAL_G2:
             g2_num    = cargar_gemas_galeria2(g2_items);
-            g2_cursor = 0;
+            g2_cursor = 0; g2_scroll = 0;
             vista = VISTA_G2;
             render_g2();
             break;
         case GAL_G3:
             g3_num    = cargar_gemas_galeria3(g3_items);
-            g3_cursor = 0;
+            g3_cursor = 0; g3_scroll = 0;
+            ordenar_g3();
             vista = VISTA_G3;
             render_g3();
             break;
     }
+
+    fade_in();
 }
 
 // ============================================================
@@ -617,47 +726,46 @@ static void cambiar_galeria(int dir)
 
 void galeria_init(void)
 {
-    num_items = cargar_gemas(items);
-    g2_num = cargar_gemas_galeria2(g2_items);
-    g3_num = cargar_gemas_galeria3(g3_items);
+    fade_out();
 
-    cursor         = 0;
-    scroll         = 0;
-    g2_cursor      = 0;
-    g3_cursor      = 0;
+    num_items = cargar_gemas(items);
+    g2_num    = cargar_gemas_galeria2(g2_items);
+    g3_num    = cargar_gemas_galeria3(g3_items);
+
+    cursor    = 0; scroll    = 0;
+    g2_cursor = 0; g2_scroll = 0;
+    g3_cursor = 0; g3_scroll = 0;
     opcion_submenu = 0;
     galeria_activa = GAL_G1;
     vista          = VISTA_LISTA;
 
-    // render_lista() ya llama a init_paleta_ui() en el VBlank
-    render_lista();
-}
+    ordenar_g3();
 
-// Variable estática para guardar qué botones estaban pulsados en el frame anterior
-static uint16_t keys_old = 0;
+    render_lista();
+    fade_in();
+}
 
 // ============================================================
 // INPUT
-//
-// Regla de render tras input:
-//   - render_lista() / render_g2() / render_g3() hacen su propio
-//     vsync + paleta + flip internamente.
-//   - render_ficha() solo pinta encima del back buffer que render_lista()
-//     dejó preparado; necesita un flip adicional propio.
-//   - Un solo render por evento de input. Sin render duplicado.
 // ============================================================
+
+static uint16_t keys_old = 0;
+
 void galeria_input(uint16_t keys)
 {
     uint16_t keys_pressed = keys & ~keys_old;
     keys_old = keys;
 
     if (keys_pressed & KEY_START) {
-        volver_menu();
+        volver_menu_con_fade();
         return;
     }
     if (keys_pressed & KEY_L) { cambiar_galeria(-1); return; }
     if (keys_pressed & KEY_R) { cambiar_galeria(+1); return; }
 
+    // --------------------------------------------------------
+    // G1
+    // --------------------------------------------------------
     if (galeria_activa == GAL_G1) {
         int moved = 0;
 
@@ -679,9 +787,10 @@ void galeria_input(uint16_t keys)
                 moved = 1;
             }
             if (keys_pressed & KEY_B) {
-                volver_menu();
+                volver_menu_con_fade();
                 return;
             }
+
         } else if (vista == VISTA_SUBMENU) {
             if (keys_pressed & KEY_UP) {
                 if (opcion_submenu > 0) opcion_submenu--;
@@ -712,6 +821,7 @@ void galeria_input(uint16_t keys)
                     vista = VISTA_LISTA;
                 }
             }
+
         } else if (vista == VISTA_FICHA) {
             if (keys_pressed & KEY_B) {
                 vista = VISTA_LISTA;
@@ -721,54 +831,121 @@ void galeria_input(uint16_t keys)
 
         if (moved) {
             if (vista == VISTA_FICHA) {
-                // render_lista() pinta el fondo + preview + flip.
-                // render_ficha() pinta la zona izquierda encima del mismo back buffer
-                // y necesita su propio flip para presentarlo.
                 render_lista();
                 render_ficha(cursor);
                 vsync_only();
                 init_paleta_ui();
                 flip_no_vsync();
             } else {
-                // render_lista() gestiona su propio vsync+paleta+flip.
                 render_lista();
             }
         }
     }
+    // --------------------------------------------------------
+    // G2
+    // --------------------------------------------------------
     else if (galeria_activa == GAL_G2) {
         int moved = 0;
-        if ((keys_pressed & KEY_LEFT)  && g2_cursor > 0)                { g2_cursor--;           moved = 1; }
-        if ((keys_pressed & KEY_RIGHT) && g2_cursor < g2_num - 1)       { g2_cursor++;           moved = 1; }
-        if ((keys_pressed & KEY_UP)    && g2_cursor >= G2_COLS)          { g2_cursor -= G2_COLS;  moved = 1; }
-        if ((keys_pressed & KEY_DOWN)  && g2_cursor + G2_COLS < g2_num) { g2_cursor += G2_COLS;  moved = 1; }
 
-        if (keys_pressed & KEY_B) {
-            volver_menu();
-            return;
+        if (vista == VISTA_G2) {
+            if ((keys_pressed & KEY_DOWN) && g2_cursor + 1 < g2_num) {
+                g2_cursor++;
+                if (g2_cursor >= g2_scroll + LIST_ITEMS)
+                    g2_scroll = g2_cursor - LIST_ITEMS + 1;
+                moved = 1;
+            }
+            if ((keys_pressed & KEY_UP) && g2_cursor > 0) {
+                g2_cursor--;
+                if (g2_cursor < g2_scroll) g2_scroll = g2_cursor;
+                moved = 1;
+            }
+            if ((keys_pressed & KEY_A) && g2_num > 0) {
+                vista = VISTA_G2_SUBMENU;
+                g2_submenu = 0;
+                moved = 1;
+            }
+            if (keys_pressed & KEY_B) {
+                volver_menu_con_fade();
+                return;
+            }
+
+        } else if (vista == VISTA_G2_OBSERVAR) {
+            if (keys_pressed & KEY_B) {
+                vista = VISTA_G2;
+                render_g2();
+            }
+
+        } else if (vista == VISTA_G2_SUBMENU) {
+            if (keys_pressed & KEY_UP)   { g2_submenu = !g2_submenu; moved = 1; }
+            if (keys_pressed & KEY_DOWN) { g2_submenu = !g2_submenu; moved = 1; }
+            if (keys_pressed & KEY_B)    { vista = VISTA_G2; moved = 1; }
+            if (keys_pressed & KEY_A) {
+                if (g2_submenu == 0) {
+                    vista = VISTA_G2_OBSERVAR;
+                    render_observar(&g2_items[g2_cursor]);
+                } else {
+                    devolver_a_g1(g2_cursor);
+                    vista = VISTA_G2;
+                    moved = 1;
+                }
+            }
         }
 
-        if (moved) {
-            render_g2();
-        }
+        if (moved) render_g2();
     }
+    // --------------------------------------------------------
+    // G3
+    // --------------------------------------------------------
     else if (galeria_activa == GAL_G3) {
         int moved = 0;
-        if ((keys_pressed & KEY_LEFT)  && g3_cursor > 0)                { g3_cursor--;           moved = 1; }
-        if ((keys_pressed & KEY_RIGHT) && g3_cursor < g3_num - 1)       { g3_cursor++;           moved = 1; }
-        if ((keys_pressed & KEY_UP)    && g3_cursor >= G3_COLS)          { g3_cursor -= G3_COLS;  moved = 1; }
-        if ((keys_pressed & KEY_DOWN)  && g3_cursor + G3_COLS < g3_num) { g3_cursor += G3_COLS;  moved = 1; }
 
-        if ((keys_pressed & KEY_A) && g3_num > 0) {
-            comprar_desde_g3(g3_cursor);
-            moved = 1;
-        }
-        if (keys_pressed & KEY_B) {
-            volver_menu();
-            return;
+        if (vista == VISTA_G3) {
+            if ((keys_pressed & KEY_DOWN) && g3_cursor + 1 < g3_num) {
+                g3_cursor++;
+                if (g3_cursor >= g3_scroll + LIST_ITEMS)
+                    g3_scroll = g3_cursor - LIST_ITEMS + 1;
+                moved = 1;
+            }
+            if ((keys_pressed & KEY_UP) && g3_cursor > 0) {
+                g3_cursor--;
+                if (g3_cursor < g3_scroll) g3_scroll = g3_cursor;
+                moved = 1;
+            }
+            if ((keys_pressed & KEY_A) && g3_num > 0) {
+                vista = VISTA_G3_SUBMENU;
+                g3_submenu = 0;
+                moved = 1;
+            }
+            if (keys_pressed & KEY_B) {
+                volver_menu_con_fade();
+                return;
+            }
+
+        } else if (vista == VISTA_G3_OBSERVAR) {
+            if (keys_pressed & KEY_B) {
+                vista = VISTA_G3;
+                render_g3();
+            }
+
+        } else if (vista == VISTA_G3_SUBMENU) {
+            if (keys_pressed & KEY_UP)   { g3_submenu = !g3_submenu; moved = 1; }
+            if (keys_pressed & KEY_DOWN) { g3_submenu = !g3_submenu; moved = 1; }
+            if (keys_pressed & KEY_B)    { vista = VISTA_G3; moved = 1; }
+            if (keys_pressed & KEY_A) {
+                if (g3_submenu == 0) {
+                    /* COMPRAR */
+                    comprar_desde_g3(g3_cursor);
+                    ordenar_g3();
+                    vista = VISTA_G3;
+                    moved = 1;
+                } else {
+                    /* OBSERVAR */
+                    vista = VISTA_G3_OBSERVAR;
+                    render_observar(&g3_items[g3_cursor]);
+                }
+            }
         }
 
-        if (moved) {
-            render_g3();
-        }
+        if (moved) render_g3();
     }
 }

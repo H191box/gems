@@ -1,26 +1,4 @@
-/*
- * gema.c
- * Implementación de la entidad Gema — Gacha de Ópalos GBA
- *
- * MIGRACIÓN (Fase 1 + Fase 2 del Plan de Migración):
- *
- *   ELIMINADO:
- *     - #include "opalo.h"  → sustituido por opalo_data.h (vía gema.h)
- *     - Tablas de pesos hardcodeadas de BIOMA_AFIN y CICLO[] locales
- *     - Enum TipoOpalo / PatronOpalo locales (ahora en opalo_data.h / patron_data.h)
- *     - crear_gema_desde_chunk() → depende de Chunk (eliminado del proyecto)
- *     - Toda referencia a Chunk / chunk.h
- *
- *   AÑADIDO:
- *     - crear_gema() → construye Gema desde ciudad_id + dia + entropía directa
- *     - derivar_tipo() ahora consulta tipos_opalo[] de opalo_data.h
- *     - gema_patron() ahora consulta patrones[]    de patron_data.h
- *
- *   SIN CAMBIOS DE COMPORTAMIENTO:
- *     Las funciones de hash, los pesos de bioma, los multiplicadores de
- *     economía y toda la lógica de atributos son idénticos al original.
- *     Las seeds existentes producen exactamente los mismos resultados.
- */
+// gema.c
 
 #include "gema.h"
 #include "opalo_data.h"
@@ -198,15 +176,31 @@ TipoOpalo gema_tipo(const Gema *g)
  */
 PatronOpalo gema_patron(const Gema *g)
 {
-    /* Mismos umbrales que el original para preservar seeds existentes */
+    /*
+     * Distribución de probabilidad por rareza (255 valores):
+     *
+     *   [  0, 109) → NEBULA     110/255 = 43%  rareza 0 — común
+     *   [110, 174) → VENAS       65/255 = 25%  rareza 1 — poco común
+     *   [174, 210) → MOSAICO     36/255 = 14%  rareza 2 — raro
+     *   [210, 234) → CHAOS       24/255 =  9%  rareza 3 — épico
+     *   [234, 244) → PINFIRE     10/255 =  4%  rareza 3 — épico
+     *   [244, 251) → HARLEQUIN    7/255 =  3%  rareza 4 — legendario
+     *   [251, 255) → MATRIX       4/255 =  2%  rareza 4 — legendario
+     *
+     * NOTA: Matrix pasa a ser el más raro del juego (2%), coherente
+     * con ser el patrón visualmente más complejo y valioso.
+     * Pinfire y Chaos comparten rareza épica pero Pinfire es algo
+     * menos frecuente para reforzar su sensación de hallazgo especial.
+     */
     uint8_t pr = slot(g->seed, 11, 255);
     uint8_t id;
-    if      (pr < 128) id = PATRON_ID_NEBULA;
-    else if (pr < 192) id = PATRON_ID_VENAS;
-    else if (pr < 224) id = PATRON_ID_MATRIX;
-    else if (pr < 240) id = PATRON_ID_MOSAICO;
-    else if (pr < 252) id = PATRON_ID_CHAOS;
-    else               id = PATRON_ID_HARLEQUIN;
+    if      (pr < 110) id = PATRON_ID_NEBULA;
+    else if (pr < 175) id = PATRON_ID_VENAS;
+    else if (pr < 211) id = PATRON_ID_MOSAICO;
+    else if (pr < 235) id = PATRON_ID_CHAOS;
+    else if (pr < 245) id = PATRON_ID_PINFIRE;
+    else if (pr < 252) id = PATRON_ID_HARLEQUIN;
+    else               id = PATRON_ID_MATRIX;
 
     /* Guarda de rango: si el id supera el catálogo, cae a Nebula */
     if (id >= NUM_PATRONES) id = PATRON_ID_NEBULA;
@@ -226,9 +220,56 @@ uint8_t gema_pureza(const Gema *g)
     else              return (uint8_t)(95 + (p % 6));
 }
 
+uint8_t gema_sesgo_peso(const Gema *g)
+{
+    return 5 + ((g->seed >> 7) % 36);
+}
+
+uint16_t gema_quilates_aparentes(const Gema *g)
+{
+    uint32_t q = g->quilates;
+
+    if (g->etapa == ETAPA_BRUTA) {
+        q += (q * gema_sesgo_peso(g)) / 100;
+    }
+
+    return (uint16_t)q;
+}
+
+/* ------------------------------------------------------------------ */
+/* Suciedad aparente (Fase 2)                                         */
+/*                                                                    */
+/* Análogo exacto a gema_sesgo_peso(): deriva un nivel consistente    */
+/* por gema que en ETAPA_CORTADA distorsiona los atributos estéticos  */
+/* visibles. En ETAPA_PULIDA el render ignora este valor.             */
+/*                                                                    */
+/* Usa slot 25 — libre, no colisiona con ningún slot existente.       */
+/*                                                                    */
+/* Tabla de desviación máxima por nivel:                              */
+/*   0 → ±5%   (gema casi limpia, la suciedad apenas afecta)         */
+/*   1 → ±15%  (suciedad moderada)                                   */
+/*   2 → ±28%  (muy sucia)                                           */
+/*   3 → ±40%  (lodosa, atributos muy difíciles de leer)             */
+/* ------------------------------------------------------------------ */
+
+uint8_t gema_suciedad(const Gema *g)
+{
+    return slot(g->seed, 25, SUCIEDAD_NIVELES);
+}
+
 /* ------------------------------------------------------------------ */
 /* Simulación procedural de Apariencia                                */
 /* ------------------------------------------------------------------ */
+
+/*
+ * Tabla de desviación máxima por nivel de suciedad (en 1/100).
+ * Nivel 0: ±5%, nivel 1: ±15%, nivel 2: ±28%, nivel 3: ±40%.
+ * El signo de la desviación se decide con un segundo slot por atributo,
+ * de modo que la suciedad puede tanto inflar como desinflar cada valor
+ * — igual que el sesgo_visual, nunca se sabe si la gema mejora o empeora
+ * al pulirse.
+ */
+static const uint8_t SUCIEDAD_DESV[SUCIEDAD_NIVELES] = { 5, 15, 28, 40 };
 
 void gema_calcular_atributos(const Gema *g, AtributosGema *attr)
 {
@@ -252,12 +293,39 @@ void gema_calcular_atributos(const Gema *g, AtributosGema *attr)
         attr->fuego_aparente  = (uint8_t)(f_ap < 0 ? 0 : (f_ap > 255 ? 255 : f_ap));
     }
     else if (g->etapa == ETAPA_CORTADA) {
-        int32_t b_ap = (int32_t)attr->brillo_real - 10 + (attr->sesgo_visual / 2);
-        int32_t f_ap = (int32_t)attr->fuego_real  - 10 + (attr->sesgo_visual / 2);
+        /*
+         * Fase 2: los atributos estéticos reales son ya visibles en
+         * principio, pero la suciedad residual los distorsiona.
+         *
+         * Mecánica (paralela a quilates_aparentes en Fase 1):
+         *   - gema_suciedad() devuelve el nivel [0..3], que mapea a un
+         *     porcentaje de desviación máxima via SUCIEDAD_DESV[].
+         *   - Dos slots independientes (26 para brillo, 27 para fuego)
+         *     determinan el signo y la magnitud real de cada distorsión.
+         *     Esto hace que brillo y fuego puedan desviarse en sentidos
+         *     opuestos: una gema puede parecer apagada pero con mucho
+         *     fuego, o viceversa.
+         *   - El rango de slot es 201 [0..200] → restar 100 da [-100..+100],
+         *     luego se escala por desv/100 para obtener el delta final.
+         *   - Al pulir (Fase 3), el else inferior devuelve los valores
+         *     reales sin ningún sesgo: la "revelación" es inmediata.
+         */
+        uint8_t nivel_suciedad = gema_suciedad(g);
+        uint8_t desv           = SUCIEDAD_DESV[nivel_suciedad];
+
+        /* Delta brillo: slot 26, rango [-100..+100] escalado a [-desv..+desv] */
+        int32_t delta_b = ((int32_t)slot(g->seed, 26, 201) - 100) * desv / 100;
+        /* Delta fuego:  slot 27, independiente del anterior              */
+        int32_t delta_f = ((int32_t)slot(g->seed, 27, 201) - 100) * desv / 100;
+
+        int32_t b_ap = (int32_t)attr->brillo_real + delta_b;
+        int32_t f_ap = (int32_t)attr->fuego_real  + delta_f;
+
         attr->brillo_aparente = (uint8_t)(b_ap < 0 ? 0 : (b_ap > 255 ? 255 : b_ap));
         attr->fuego_aparente  = (uint8_t)(f_ap < 0 ? 0 : (f_ap > 255 ? 255 : f_ap));
     }
     else {
+        /* ETAPA_PULIDA: suciedad eliminada, atributos reales al descubierto */
         attr->brillo_aparente = attr->brillo_real;
         attr->fuego_aparente  = attr->fuego_real;
     }
@@ -279,7 +347,7 @@ static uint32_t aplicar_curva_exponencial(uint32_t precio_por_quilate, uint16_t 
 {
     if (quilates == 0) return 0;
 
-    uint64_t total            = (uint64_t)precio_por_quilate * quilates;
+    uint64_t total              = (uint64_t)precio_por_quilate * quilates;
     uint64_t factor_exponencial = 100;
     int tramos = quilates / 30;
 
@@ -307,40 +375,48 @@ uint32_t gema_valor_real(const Gema *g)
     if (patron >= NUM_PATRONES)    return 0;
 
     /*
-     * Precio base por quilate indexado por tipo.
-     * Al añadir tipos en opalo_data.h hay que extender esta tabla.
-     * Una mejora futura puede mover estos valores a TipoOpaloDef.
+     * BASE ECONÓMICA AJUSTADA
+     * Objetivo: bajar inflación global (~30–45% menos que antes)
      */
     static const uint16_t PRECIO_QUILATE_BASE[NUM_TIPOS_OPALO] = {
-        /* NEGRO   */ 45,
-        /* CRISTAL */ 30,
-        /* FUEGO   */ 35,
+        /* NEGRO   */ 28,
+        /* CRISTAL */ 22,
+        /* FUEGO   */ 25,
         /* BLANCO  */ 12,
-        /* ROSA    */ 18,
-        /* GRIS    */  5,
+        /* ROSA    */ 16,
+        /* GRIS    */  6,
     };
 
     /*
-     * Multiplicador de patrón indexado por PatronOpalo.
-     * Al añadir patrones en patron_data.h hay que extender esta tabla.
-     * Una mejora futura puede mover estos valores a PatronDef.
+     * PATRONES REBALANCEADOS (menos escalones extremos)
+     * Objetivo: diferencias visibles pero no explosivas
      */
     static const uint8_t MULT_PATRON[NUM_PATRONES] = {
-        /* NEBULA    */ 10,
-        /* VENAS     */ 12,
-        /* MATRIX    */ 15,
-        /* MOSAICO   */ 20,
-        /* CHAOS     */ 25,
-        /* HARLEQUIN */ 35,
+        /* NEBULA    */ 10,  /* 1.00x */
+        /* VENAS     */ 11,  /* 1.10x */
+        /* MATRIX    */ 12,  /* 1.20x */
+        /* MOSAICO   */ 13,  /* 1.30x */
+        /* CHAOS     */ 14,  /* 1.40x */
+        /* HARLEQUIN */ 16,  /* 1.60x */
     };
 
-    uint32_t precio_q = ((uint32_t)PRECIO_QUILATE_BASE[tipo] * MULT_PATRON[patron]) / 10u;
-    precio_q += (slot(g->seed, 12, 50)) + (slot(g->seed, 14, 50));
+    uint32_t precio_q =
+        ((uint32_t)PRECIO_QUILATE_BASE[tipo] * MULT_PATRON[patron]) / 10u;
+
+    /*
+     * RNG reducido (~±10% de ruido)
+     */
+    int32_t ruido =
+        (int32_t)slot(g->seed, 12, 21) - 10 +
+        (int32_t)slot(g->seed, 14, 21) - 10;
+
+    precio_q = (uint32_t)((int32_t)precio_q + ruido);
+    if ((int32_t)precio_q < 1) precio_q = 1;
 
     uint32_t valor = aplicar_curva_exponencial(precio_q, g->quilates);
 
     if (g->flags & GEMA_FLAG_GRIETAS) {
-        valor = (valor * 30u) / 100u;
+        valor = (valor * 45u) / 100u;  /* 55% pérdida */
     }
 
     return valor;
@@ -350,32 +426,50 @@ uint32_t gema_valor_estimado(const Gema *g)
 {
     if (!gema_es_valida(g)) return 0;
 
+    /* FASE 3 (Etapa Pulida): valor real definitivo */
     if (g->etapa >= ETAPA_PULIDA) {
         return gema_valor_real(g);
     }
 
-    AtributosGema attr;
-    gema_calcular_atributos(g, &attr);
-
     TipoOpalo tipo = gema_tipo(g);
-    static const uint16_t PRECIO_QUILATE_BASE[NUM_TIPOS_OPALO] = {
-        45, 30, 35, 12, 18, 5
-    };
-
     if (tipo >= NUM_TIPOS_OPALO) return 0;
 
-    uint32_t precio_q_estimado = PRECIO_QUILATE_BASE[tipo];
+    /* Mismos arrays que gema_valor_real() para evitar choque de precios */
+    static const uint16_t PRECIO_QUILATE_BASE[NUM_TIPOS_OPALO] = {
+        28, 22, 25, 12, 16, 6
+    };
+    static const uint8_t MULT_PATRON[NUM_PATRONES] = {
+        10, 11, 12, 13, 14, 16
+    };
 
+    PatronOpalo patron = gema_patron(g);
+
+    uint32_t precio_q = ((uint32_t)PRECIO_QUILATE_BASE[tipo] * MULT_PATRON[patron]) / 10u;
+
+    int32_t ruido = (int32_t)slot(g->seed, 12, 21) - 10 + (int32_t)slot(g->seed, 14, 21) - 10;
+    precio_q = (uint32_t)((int32_t)precio_q + ruido);
+    if ((int32_t)precio_q < 1) precio_q = 1;
+
+    /*
+     * FASE 2 (Etapa Cortada):
+     * Valor al 85% del potencial real. Al pulir subirá ~17%...
+     * a menos que se agriete (cae al 45%).
+     */
     if (g->etapa == ETAPA_CORTADA) {
-        precio_q_estimado = (precio_q_estimado * 75u) / 100u;
-        precio_q_estimado += (attr.calidad_aparente / 4);
-        return aplicar_curva_exponencial(precio_q_estimado, g->quilates);
+        uint32_t valor_teorico = aplicar_curva_exponencial(precio_q, g->quilates);
+        return (valor_teorico * 85u) / 100u;
     }
 
-    precio_q_estimado = (precio_q_estimado * 18u) / 100u;
-    precio_q_estimado += (attr.calidad_aparente / 8);
+    /*
+     * FASE 1 (Etapa Bruta):
+     * Base al 50%, pero quilates aparentes (inflados con roca inútil).
+     * Al cortar el peso bajará pero la calidad subirá del 50% al 85%.
+     */
+    uint32_t precio_q_bruto = (precio_q * 50u) / 100u;
+    if (precio_q_bruto < 1) precio_q_bruto = 1;
 
-    uint32_t valor_f1 = aplicar_curva_exponencial(precio_q_estimado, g->quilates);
+    uint32_t valor_f1 = aplicar_curva_exponencial(precio_q_bruto, gema_quilates_aparentes(g));
+
     return (valor_f1 < 10u) ? 10u : valor_f1;
 }
 
@@ -385,10 +479,6 @@ uint32_t gema_valor_estimado(const Gema *g)
 
 /*
  * crear_gema() — reemplaza crear_gema_desde_chunk()
- *
- * Construye una Gema directamente desde ciudad_id, dia_actual y una
- * semilla de entropía externa (puede venir del RNG del juego, de un
- * timer, del índice de slot, etc.).
  *
  * Layout de seed:
  *   bits [31:24] = ciudad_id

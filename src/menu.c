@@ -126,6 +126,7 @@ void volver_menu_con_fade(void) {
     fade_out();
     aplicar_paleta_segun_bioma(ciudad_actual_idx);
     dibujar_menu(opcion_menu);
+    flip();      /* presentar el menú antes del fade */
     fade_in();
     estado = ESTADO_MENU;
 }

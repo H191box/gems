@@ -2,9 +2,9 @@
 #include <string.h>
 #include "video.h"
 #include "gema.h"
-#include "render.h"      // Funciones generales y utilidades (get_vram, etc.)
-#include "plasma.h"      // Motor matemático puro (plasma_pixel_smooth)
-#include "gema_render.h" // Prototipos locales
+#include "render.h"
+#include "plasma.h"
+#include "gema_render.h"
 
 /* ================================================================
    BUFFER DE GRIETAS Y ANIMACIÓN
@@ -18,34 +18,54 @@ uint8_t* get_anim_buf_a(void) { return anim_buf_a; }
 uint8_t* get_anim_buf_b(void) { return anim_buf_b; }
 
 /* ================================================================
+   CACHÉ DE RENDER PRO
+   El ópalo grande (240x160) es el render más caro del juego.
+   Se precalcula una sola vez en anim_buf_b y se reutiliza mientras
+   la gema no cambie. dirty se activa cuando cambia cualquier campo.
+   Coste cuando no hay cambio: una comparación de 4 campos.
+================================================================ */
+static uint32_t cache_seed     = 0;
+static uint16_t cache_quilates = 0;
+static uint8_t  cache_etapa    = 0xFF;  /* valor imposible — fuerza primer cálculo */
+static uint8_t  cache_flags    = 0;
+
+static int cache_pro_dirty(const Gema *g)
+{
+    return (g->seed     != cache_seed     ||
+            g->quilates != cache_quilates  ||
+            g->etapa    != cache_etapa    ||
+            g->flags    != cache_flags);
+}
+
+static void cache_pro_marcar(const Gema *g)
+{
+    cache_seed     = g->seed;
+    cache_quilates = g->quilates;
+    cache_etapa    = g->etapa;
+    cache_flags    = g->flags;
+}
+
+/* ================================================================
    PALETA ROCA (Adaptada a Gema)
 ================================================================ */
 static void aplicar_paleta_roca(const Gema* g) {
     uint16_t* pal = (uint16_t*)0x05000000;
 
-    // Colores base para la matriz de roca (Índices 10 a 29)
     for (int i = 0; i < 20; i++) {
         int v = 8 + i;
         pal[10 + i] = (v & 31) | ((v & 31) << 5) | ((v & 31) << 10);
     }
 
-    pal[0]   = 0x0000; // Transparente / Fondo oscuro
-    pal[255] = 0x7FFF; // Blanco puro
+    pal[0]   = 0x0000;
+    pal[255] = 0x7FFF;
 
-    // Índice 9: Color característico del núcleo visible según tipo de ópalo
     switch (gema_tipo(g)) {
-        case 0: // OPALO_NEGRO
-            pal[9] = (2 & 31) | ((1 & 31) << 5) | ((4 & 31) << 10); break;
-        case 1: // OPALO_CRISTAL
-            pal[9] = (3 & 31) | ((3 & 31) << 5) | ((6 & 31) << 10); break;
-        case 2: // OPALO_FUEGO
-            pal[9] = (6 & 31) | ((2 & 31) << 5) | ((1 & 31) << 10); break;
-        case 3: // OPALO_ROSA
-            pal[9] = (8 & 31) | ((3 & 31) << 5) | ((6 & 31) << 10); break;
-        case 4: // OPALO_GRIS
-            pal[9] = (4 & 31) | ((4 & 31) << 5) | ((4 & 31) << 10); break;
-        default:
-            pal[9] = (4 & 31) | ((4 & 31) << 5) | ((5 & 31) << 10); break;
+        case 0: pal[9] = (2 & 31) | ((1 & 31) << 5) | ((4 & 31) << 10); break;
+        case 1: pal[9] = (3 & 31) | ((3 & 31) << 5) | ((6 & 31) << 10); break;
+        case 2: pal[9] = (6 & 31) | ((2 & 31) << 5) | ((1 & 31) << 10); break;
+        case 3: pal[9] = (8 & 31) | ((3 & 31) << 5) | ((6 & 31) << 10); break;
+        case 4: pal[9] = (4 & 31) | ((4 & 31) << 5) | ((4 & 31) << 10); break;
+        default: pal[9] = (4 & 31) | ((4 & 31) << 5) | ((5 & 31) << 10); break;
     }
 }
 
@@ -57,7 +77,6 @@ void quilates_to_radii(uint16_t quilates, int* out_a, int* out_b) {
     if (q < 1)   q = 1;
     if (q > 225) q = 225;
 
-    // Mapeo no lineal para que los ópalos pequeños sigan siendo visibles
     int a = 3 + ((q - 1) * 42 + 112) / 224;
     int b = (a * 65 + 50) / 100;
     if (b < 2) b = 2;
@@ -68,73 +87,145 @@ void quilates_to_radii(uint16_t quilates, int* out_a, int* out_b) {
 
 /* ================================================================
    MOTOR DE RENDERIZADO PRO (Dinámico)
+
+   OPTIMIZACIÓN v2:
+   - Usa plasma_pixel() en lugar de plasma_pixel_smooth().
+     A 240x160 el suavizado 2x2 no es perceptible y cuesta 4x.
+     Ahorro: ~90.000 llamadas a plasma_pixel() por frame evitadas.
+   - El resultado se guarda en anim_buf_b (EWRAM).
+     renderizar_opalo_grande() comprueba el flag dirty antes de
+     recalcular — si la gema no cambió, reutiliza el buffer.
 ================================================================ */
-void renderizar_opalo_pro(uint8_t *buffer, int w, int h, const Gema *g) {
+void renderizar_opalo_pro(uint8_t *buffer, int w, int h, const Gema *g)
+{
+    // SISTEMA DE PESO APARENTE: La roca se dibujará más grande o pequeña de lo real en Fase 1
+    int q = (g->etapa == ETAPA_BRUTA) ? gema_quilates_aparentes(g) : g->quilates;
+    
     int a, b;
-    quilates_to_radii(g->quilates, &a, &b);
+    quilates_to_radii(q, &a, &b);
 
     int a2 = a * a;
     int b2 = b * b;
     int a2b2 = a2 * b2;
 
-    /* Sprint 1: Highlight reducido — aspecto pulido, no plástico */
+    int sa = a + 1;
+    int sb = b + 1;
+    int sa2 = sa * sa;
+    int sb2 = sb * sb;
+    int sa2sb2 = sa2 * sb2;
+
+    int shadow_off_x = 1;
+    int shadow_off_y = 1;
+
     int hx_off = -(a / 4);
     int hy_off = -(b * 4 / 10);
     int ha = (a * 4 / 10);
     int hb = (b * 2 / 10);
-    if (ha < 2) ha = 2; if (hb < 2) hb = 2;
+
+    if (ha < 2) ha = 2;
+    if (hb < 2) hb = 2;
+
     int ha2 = ha * ha;
     int hb2 = hb * hb;
     int ha2hb2 = ha2 * hb2;
 
-    /* Sprint 2: Rim-light — elipse fina justo dentro del borde,
-     * solo en el cuadrante superior-izquierdo (zona iluminada).
-     * Radio: 92% del cabujón para que sea un anillo estrecho.    */
-    int rim_thresh = a2b2 * 92 / 100;
-
     int cx = w / 2;
     int cy = h / 2;
+
     uint8_t off = (uint8_t)(g->seed ^ (g->seed >> 16));
 
-    for (int y = 0; y < h; y++) {
+    // GENERACIÓN DE FORMA IRREGULAR (Squircle asimétrico por cuadrantes)
+    int k_q1 = 0, k_q2 = 0, k_q3 = 0, k_q4 = 0;
+    if (g->etapa == ETAPA_BRUTA) {
+        k_q1 = 80 + ((g->seed >> 2) % 140);
+        k_q2 = 80 + ((g->seed >> 5) % 140);
+        k_q3 = 80 + ((g->seed >> 8) % 140);
+        k_q4 = 80 + ((g->seed >> 11) % 140);
+    }
+
+    for (int y = 0; y < h; y++)
+    {
         int dy = y - cy;
         int dy2 = dy * dy;
-        for (int x = 0; x < w; x++) {
+
+        for (int x = 0; x < w; x++)
+        {
             int dx = x - cx;
             int dx2 = dx * dx;
 
-            if (dx2 * b2 + dy2 * a2 <= a2b2) {
+            int inside_main = 0;
+            int inside_shadow = 0;
+            int dist_val = 0;
+
+            if (g->etapa == ETAPA_BRUTA) {
+                // Cálculo de deformación tipo patata
+                int k = (dx > 0) ? ((dy > 0) ? k_q1 : k_q4) : ((dy > 0) ? k_q2 : k_q3);
+                int dxdy2 = (dx * dy) * (dx * dy);
+                int subtract = (dxdy2 >> 8) * k;
+                
+                dist_val = (dx2 * b2 + dy2 * a2) - subtract;
+                inside_main = (dist_val <= a2b2);
+                
+                // Aplicar la misma deformación a la sombra
+                int sdx = dx - shadow_off_x;
+                int sdy = dy - shadow_off_y;
+                int sk = (sdx > 0) ? ((sdy > 0) ? k_q1 : k_q4) : ((sdy > 0) ? k_q2 : k_q3);
+                int sdxdy2 = (sdx * sdy) * (sdx * sdy);
+                int sub_s = (sdxdy2 >> 8) * sk;
+                inside_shadow = ((sdx * sdx * sb2 + sdy * sdy * sa2) - sub_s <= sa2sb2);
+            } else {
+                dist_val = (dx2 * b2 + dy2 * a2);
+                inside_main = (dist_val <= a2b2);
+                
+                int sdx = dx - shadow_off_x;
+                int sdy = dy - shadow_off_y;
+                inside_shadow = ((sdx * sdx * sb2 + sdy * sdy * sa2) <= sa2sb2);
+            }
+
+            if (inside_main)
+            {
                 int src_x = (dx + a) * 120 / (a * 2);
-                int src_y = (dy + b) * 80 / (b * 2);
-                uint8_t color = plasma_pixel_smooth(src_x, src_y, off, g);
+                int src_y = (dy + b) * 80  / (b * 2);
+                uint8_t color = plasma_pixel(src_x, src_y, off, g);
 
-                /* Sprint 2: Oscurecimiento radial — más oscuro cerca del borde.
-                 * edge en [0, 256]: 0=centro, 256=borde.
-                 * Por encima de 180 (~70% del radio) se oscurece gradualmente. */
-                int edge = (dx2 * b2 + dy2 * a2) * 256 / a2b2;
-                if (edge > 180) {
-                    int fade = (edge - 180);          /* [0, 76]        */
-                    int c = (int)color - (fade >> 1); /* resta suave    */
-                    color = (c < 16) ? 16 : (uint8_t)c;
-                }
+                if (g->etapa == ETAPA_BRUTA) {
+                    // ROCA BRUTA: Textura granulada y sin highlights pulidos
+                    int ruido = ((dx * 17) ^ (dy * 31) ^ g->seed) & 31;
+                    if (dist_val > (a2b2 * 65 / 100)) {
+                        // Sombra rugosa en los bordes opuestos a la luz
+                        if (ruido > 15 && dx >= -a/2 && dy >= -b/2) {
+                            int cv = (int)color - 20;
+                            color = (cv < 16) ? 16 : (uint8_t)cv;
+                        }
+                    }
+                    // Microporos aleatorios en el cuerpo de la gema
+                    if (ruido == 0) {
+                        int cv = (int)color - 15;
+                        color = (cv < 16) ? 16 : (uint8_t)cv;
+                    }
+                } else {
+                    // GEMA PULIDA/CORTADA: Cabujón perfecto con reflejos (Código Original)
+                    int edge = dist_val * 256 / a2b2;
+                    if (edge > 180) {
+                        int fade = edge - 180;
+                        int c = (int)color - (fade >> 1);
+                        color = (c < 16) ? 16 : (uint8_t)c;
+                    }
 
-                /* Sprint 1: Destello especular (highlight pequeño) */
-                int hdx = dx - hx_off;
-                int hdy = dy - hy_off;
-                if ((hb2 * hdx * hdx + ha2 * hdy * hdy) <= ha2hb2) {
-                    color = 254;
-                }
-                /* Sprint 1: Sombra inferior-derecha correcta (oscura, no blanca) */
-                else if ((dx2 * b2 + dy2 * a2) > (a2b2 * 85 / 100) && dx >= 0 && dy >= 0) {
-                    color = 253;
-                }
-                /* Sprint 2: Rim-light superior-izquierda — línea fina brillante */
-                else if ((dx2 * b2 + dy2 * a2) > rim_thresh && dx <= 0 && dy <= 0) {
-                    int c = (int)color + 30;
-                    color = (c > 253) ? 253 : (uint8_t)c;
+                    int hdx = dx - hx_off;
+                    int hdy = dy - hy_off;
+                    if ((hb2 * hdx * hdx + ha2 * hdy * hdy) <= ha2hb2) {
+                        color = 254; // Reflejo especular
+                    } else if (dist_val > (a2b2 * 82 / 100) && dx >= 0 && dy >= 0) {
+                        int cv = (int)color - 30;
+                        color = (cv < 16) ? 16 : (uint8_t)cv;
+                    }
                 }
 
                 buffer[y * w + x] = color;
+            }
+            else if (inside_shadow) {
+                buffer[y * w + x] = 255;
             } else {
                 buffer[y * w + x] = 0;
             }
@@ -142,8 +233,18 @@ void renderizar_opalo_pro(uint8_t *buffer, int w, int h, const Gema *g) {
     }
 }
 
+/*
+ * renderizar_opalo_grande — versión con caché.
+ * Solo llama a renderizar_opalo_pro() cuando la gema cambia.
+ * En frames sucesivos con la misma gema: cero cálculo de plasma.
+ */
 void renderizar_opalo_grande(uint8_t* buf, const Gema* g) {
-    renderizar_opalo_pro(buf, 240, 160, g);
+    if (cache_pro_dirty(g)) {
+        renderizar_opalo_pro(buf, 240, 160, g);
+        cache_pro_marcar(g);
+    }
+    /* Si no es dirty, buf ya contiene el resultado correcto —
+     * el llamador es responsable de no limpiar el buffer entre frames. */
 }
 
 void renderizar_opalo_mediano(uint8_t* buf, const Gema* g) {
@@ -161,19 +262,13 @@ void renderizar_gema_a_buffer(uint8_t *buffer, int w, int h, const Gema *g) {
 /* ================================================================
    RENDER ROCA (FASE 1 - BRUTO)
 ================================================================ */
-
-/**
- * Renderiza el ópalo en bruto a pantalla completa (240x160).
- * Genera una costra exterior de roca (matriz) rota que deja ver el ópalo por dentro.
- */
 void renderizar_roca(const Gema* g) {
     uint8_t* vram = (uint8_t*)get_vram();
     aplicar_paleta_roca(g);
 
     int a, b;
-    quilates_to_radii(g->quilates, &a, &b);
+    quilates_to_radii(gema_quilates_aparentes(g), &a, &b);
 
-    // Incrementamos el radio para simular la capa rugosa de la roca exterior
     int ra = a + 8;
     int rb = b + 6;
     int ra2 = ra * ra;
@@ -192,40 +287,35 @@ void renderizar_roca(const Gema* g) {
             int dx = x - cx;
             int dx2 = dx * dx;
 
-            // ¿Está dentro del contorno exterior de la roca?
             if (dx2 * rb2 + dy2 * ra2 <= ra2rb2) {
-                // Pseudo-RNG rápido sin llamadas pesadas para dar textura rugosa a la roca
                 s_rng = s_rng * 1103515245 + 12345;
                 int ruido = (s_rng >> 16) % 6;
 
-                // Generamos una "grieta/ventana" central donde asoma el núcleo cristalino
-                // Modulado por el ruido matemático para que no sea una elipse perfecta
                 int limit_gema = (ra2rb2 * 45 / 100) + (ruido * 2000);
 
                 if (dx2 * rb2 + dy2 * ra2 <= limit_gema) {
-                    // Ventana del ópalo interno pulido
                     int src_x = (dx + a) * 120 / (a * 2 + 1);
-                    int src_y = (dy + b) * 80 / (b * 2 + 1);
-                    vram[y * 240 + x] = plasma_pixel_smooth(src_x, src_y, off, g);
+                    int src_y = (dy + b) * 80  / (b * 2 + 1);
+                    /*
+                     * plasma_pixel() en lugar de plasma_pixel_smooth().
+                     * La ventana interior de la roca es pequeña y el
+                     * smooth no aporta detalle visible aquí.
+                     */
+                    vram[y * 240 + x] = plasma_pixel(src_x, src_y, off, g);
                 } else {
-                    // Matriz de la roca externa (asigna índices de paleta 10-29 con ruido)
                     vram[y * 240 + x] = 10 + ((x + y + ruido) % 20);
                 }
             } else {
-                vram[y * 240 + x] = 0; // Fondo de pantalla limpio
+                vram[y * 240 + x] = 0;
             }
         }
     }
 }
 
-/**
- * Renderiza una roca pequeña texturizada en coordenadas arbitrarias.
- * Ideal para representar sacos recién abiertos o animaciones de inventario.
- */
 void renderizar_roca_pequena(int x_pos, int y_pos, const Gema* g) {
     uint8_t* vram = (uint8_t*)get_vram();
 
-    int r = 16; // Radio base para el mineral en bruto miniatura
+    int r = 16;
     int r2 = r * r;
     uint32_t s_rng = g->seed ^ (x_pos * y_pos);
 
@@ -243,11 +333,9 @@ void renderizar_roca_pequena(int x_pos, int y_pos, const Gema* g) {
                 s_rng = s_rng * 1103515245 + 12345;
                 int ruido = (s_rng >> 16) % 4;
 
-                // Ventanita pequeña que expone destellos del tipo de gema (índice 9)
                 if (x2 + y2 <= (r2 * 25 / 100) + ruido) {
                     vram[screen_y * 240 + screen_x] = 9;
                 } else {
-                    // Cuerpo rugoso de la piedra
                     vram[screen_y * 240 + screen_x] = 12 + ((x + y + ruido) % 15);
                 }
             }
@@ -255,19 +343,12 @@ void renderizar_roca_pequena(int x_pos, int y_pos, const Gema* g) {
     }
 }
 
-/**
- * Renderiza un icono o miniatura de ópalo directamente acotado dentro de una caja (BBox).
- * Esencial para los buffers del inventario (render_lista) o los slots de la vitrina.
- */
 void renderizar_opalo_pequeno_celda(int x_pos, int y_pos, const Gema* g, int base, int num_colores) {
     uint8_t* vram = (uint8_t*)get_vram();
-    uint32_t s_rng = g->seed ^ (x_pos * y_pos); // Semilla única por posición para variar la textura
+    uint32_t s_rng = g->seed ^ (x_pos * y_pos);
 
-    // ================================================================
-    // FASE 1: MINERAL EN BRUTO (Icono de roca rugosa)
-    // ================================================================
     if (g->etapa == ETAPA_BRUTA) {
-        int r = 13; // Radio ideal para que encaje perfectamente en la cuadrícula de 72x46
+        int r = 13;
         int r2 = r * r;
 
         for (int y = -r; y <= r; y++) {
@@ -281,32 +362,23 @@ void renderizar_opalo_pequeno_celda(int x_pos, int y_pos, const Gema* g, int bas
                 int x2 = x * x;
 
                 if (x2 + y2 <= r2) {
-                    // Generador rápido de ruido para romper los bordes perfectos
                     s_rng = s_rng * 1103515245 + 12345;
                     int ruido = (s_rng >> 16) % 4;
 
-                    // Una pequeña "ventana" en el corazón de la piedra revela el color oculto
                     if (x2 + y2 <= 5 + ruido) {
-                        vram[screen_y * 240 + screen_x] = 9; // Color característico del tipo de gema
+                        vram[screen_y * 240 + screen_x] = 9;
                     } else {
-                        // Matriz de roca rugosa (Colores 12 a 27)
                         vram[screen_y * 240 + screen_x] = 12 + ((x + y + ruido) % 15);
                     }
                 }
             }
         }
-        return; // Terminamos temprano para la roca
+        return;
     }
 
-    // ================================================================
-    // FASES 2 Y 3: CORTADA Y PULIDA (Forma de Cabujón Elíptico)
-    // ================================================================
     int a, b;
     quilates_to_radii(g->quilates, &a, &b);
 
-    /* Escala para rejilla 72x46 px con centro en la celda.
-     * Factor 71/100 para que 225q rece los bordes (~32px).
-     * Mínimos bajos para preservar diferencia visual entre tamaños. */
     a = (a * 71) / 100;
     b = (b * 71) / 100;
     if (a < 3) a = 3;
@@ -317,58 +389,60 @@ void renderizar_opalo_pequeno_celda(int x_pos, int y_pos, const Gema* g, int bas
     int a2b2 = a2 * b2;
     uint8_t off = (uint8_t)(g->seed ^ (g->seed >> 16));
 
-    /* Borde físico: elipse 1px mayor desplazada +1 abajo-derecha.
-     * Los píxeles en el borde pero fuera del interior reciben color 1
-     * (gris azulado de init_paleta_ui), creando un contorno con sombra
-     * natural — técnica de la versión clásica que daba el mejor aspecto. */
-    int ab = a + 1;
+    /* Sombra desplazada: elipse exterior desplazada 1px abajo-derecha.
+     * Crea sensación de profundidad: la gema "flota" sobre su sombra.
+     * Radio extra 3px en dirección sombra, 1px en dirección luz.      */
+    int ab = a + 1;   /* radio elipse de sombra */
     int bb = b + 1;
     int ab2 = ab * ab;
     int bb2 = bb * bb;
+    /* Desplazamiento: +1px abajo-derecha para profundidad.
+     * Con radio 3 el borde existe en todo el contorno;
+     * solo es ~1px más grueso abajo y a la derecha.                   */
+    int sombra_dx = 1;
+    int sombra_dy = 1;
+    (void)off; /* off no se usa en celda — plasma viene del caché      */
 
-    /* Highlight con variación por seed — igual que versión clásica */
-    int hl_activo = (a >= 5);
-    int hx_off = -(a / 4);
-    int hy_off = -(b * 4 / 10);
-    int ha = a * 7 / 10;
-    int hb = b * 3 / 10;
-    int seed_var     = (int)(g->seed & 7);
-    int ha_var       = ha - (ha / 10) + (seed_var * ha / 40);
-    int hb_var       = hb - (hb / 5)  + (((g->seed >> 3) & 7) * hb / 20);
-    if (ha_var < 1) ha_var = 1;
-    if (hb_var < 1) hb_var = 1;
-    int ha_var2      = ha_var * ha_var;
-    int hb_var2      = hb_var * hb_var;
-    int total_elipse = ha_var2 * hb_var2;
+    /* highlight eliminado — el borde oscuro es suficiente */
 
-    /* Iterar sobre bounding box del borde (a+1, b+1) */
-    for (int y = -(b + 1); y <= (b + 1); y++) {
+    /* El rango del loop debe cubrir la elipse de sombra (radio ab/bb)
+     * más el desplazamiento. Sin esto los píxeles del borde no se visitan. */
+    int loop_a = ab + sombra_dx + 1;
+    int loop_b = bb + sombra_dy + 1;
+
+    for (int y = -loop_b; y <= loop_b; y++) {
         int screen_y = y_pos + y;
         if (screen_y < 0 || screen_y >= 160) continue;
 
         int dy2 = y * y;
-        for (int x = -(a + 1); x <= (a + 1); x++) {
+        for (int x = -loop_a; x <= loop_a; x++) {
             int screen_x = x_pos + x;
             if (screen_x < 0 || screen_x >= 240) continue;
 
             int dx2 = x * x;
             int inside_main = (dx2 * b2 + dy2 * a2 <= a2b2);
 
-            /* Borde: elipse mayor desplazada +1 px abajo-derecha */
-            int shadow_dx  = x - 1;
-            int shadow_dy  = y - 1;
+            /* Sombra desplazada abajo-derecha: restar el offset antes del test */
+            int shadow_dx  = x - sombra_dx;
+            int shadow_dy  = y - sombra_dy;
             int inside_borde = (shadow_dx * shadow_dx * bb2 +
                                 shadow_dy * shadow_dy * ab2 <= ab2 * bb2);
 
             uint8_t c;
 
             if (inside_main) {
-                int src_x = (x + a) * 120 / ((a * 2) + 1);
-                int src_y = (y + b) * 80  / ((b * 2) + 1);
-                c = plasma_pixel_smooth(src_x, src_y, off, g);
+                int src_x = (x + a) * 119 / ((a * 2) + 1);
+                int src_y = (y + b) * 79  / ((b * 2) + 1);
 
-                /* Sombra inferior-derecha: resta directa sobre el color
-                 * del plasma — nunca índice fijo, nunca negro puro.     */
+                /*
+                 * plasma_cache_get() — cero cálculo de plasma en caliente.
+                 * Lee del buffer precalculado en EWRAM.
+                 * generar_paleta_gema() ya habrá mapeado los índices [16,254]
+                 * a los colores reales de esta gema en PALRAM.
+                 */
+                c = plasma_cache_get(src_x, src_y);
+
+                /* Sombra en borde inferior-derecho */
                 int edge_dist2 = dx2 * b2 + dy2 * a2;
                 if (edge_dist2 > (a2b2 * 85 / 100) && x >= 0 && y >= 0) {
                     int cv = (int)c - 20;
@@ -376,21 +450,6 @@ void renderizar_opalo_pequeno_celda(int x_pos, int y_pos, const Gema* g, int bas
                     c = (uint8_t)cv;
                 }
 
-                /* Highlight con variación por seed, solo en PULIDA */
-                if (hl_activo && g->etapa == ETAPA_PULIDA) {
-                    int hdx = x - hx_off;
-                    int hdy = y - hy_off;
-                    int val_elipse = hb_var2 * hdx * hdx + ha_var2 * hdy * hdy;
-                    if (val_elipse <= total_elipse) {
-                        if (val_elipse < (total_elipse * 15 / 100)) {
-                            c = 254; /* núcleo sólido */
-                        } else {
-                            if (((x + y) & 1) == 0) c = 254; /* borde dithered */
-                        }
-                    }
-                }
-
-                /* Grietas procedurales */
                 if (g->flags & GEMA_FLAG_GRIETAS) {
                     if (((x + y * 2) % 11 == 0 && x > -a && x < a / 2) ||
                         ((x - y) == 1 && y > -b / 2 && y < b)) {
@@ -398,16 +457,21 @@ void renderizar_opalo_pequeno_celda(int x_pos, int y_pos, const Gema* g, int bas
                     }
                 }
 
-                /* Remap al banco de paleta asignado */
+                /*
+                 * Remap al banco de paleta de esta gema.
+                 * base=0/num_colores=0 → paleta global (G1 preview).
+                 * base=16+i*16/num_colores=16 → banco propio (G2/G3).
+                 */
                 if (num_colores > 0 && c >= 16 && c < 254) {
-                    c = (uint8_t)(base + (c % num_colores));
+                    c = (uint8_t)(base + ((c - 16) % num_colores));
                 }
 
             } else if (inside_borde) {
-                /* Borde físico: color 1 = gris azulado oscuro de init_paleta_ui */
-                c = 1;
+                /* En modo banco (G2/G3): primer color del banco = tono oscuro de esa gema.
+                 * En modo paleta global (G1 preview): pal[255] = 0x4210 antracita.       */
+                c = (num_colores > 0) ? (uint8_t)base : 255;
             } else {
-                continue; /* fuera del borde — no pintar, dejar fondo */
+                continue;
             }
 
             vram[screen_y * 240 + screen_x] = c;
@@ -415,10 +479,67 @@ void renderizar_opalo_pequeno_celda(int x_pos, int y_pos, const Gema* g, int bas
     }
 }
 
-// ============================================================================
-// ENLACE PARA EL LINKER
-// ============================================================================
+/* ================================================================
+   PALETA POR BANCO — para G2/G3 con múltiples gemas simultáneas
+   Escribe num_colores entradas a partir de pal[base].
+   Cada gema tiene su banco propio — no interfieren entre sí.
+================================================================ */
+void generar_paleta_banco(const Gema *g, int base, int num_colores)
+{
+    volatile uint16_t *pal = (volatile uint16_t *)0x05000000;
+    TipoOpalo tipo          = gema_tipo(g);
+    uint8_t   color_offset  = (uint8_t)(g->seed & 0xFF);
+    uint8_t   iridiscencia  = gema_iridiscencia(g);
+    int       spread        = 1 + (iridiscencia / 8);
 
+    for (int i = 0; i < num_colores; i++) {
+        /* Mapear el índice del banco al rango [16,254] del plasma */
+        int src = 16 + (i * 238) / num_colores;
+        int r, gc, b;
+
+        switch (tipo) {
+            case OPALO_NEGRO:
+                r  = (lut_s((src * spread + color_offset) & 63) + 4096) >> 8;
+                gc = (lut_c((src * spread * 2 + color_offset) & 63) + 4096) >> 8;
+                b  = 20 + ((lut_s((src * spread + color_offset) & 63) + 4096) >> 10);
+                break;
+            case OPALO_CRISTAL:
+                r  = 18 + ((lut_s((src * spread + color_offset) & 63) + 4096) >> 9);
+                gc = 18 + ((lut_c((src * spread + color_offset) & 63) + 4096) >> 9);
+                b  = 24 + ((lut_c((src * spread + color_offset) & 63) + 4096) >> 9);
+                break;
+            case OPALO_FUEGO:
+                r  = 28 + ((lut_c((src * spread + color_offset) & 63) + 4096) >> 9);
+                gc = (lut_s((src * spread + color_offset) & 63) + 4096) >> 8;
+                b  = (lut_c((src * spread + color_offset) & 63) + 4096) >> 10;
+                break;
+            case OPALO_ROSA:
+                r  = 24 + ((lut_s((src * spread + color_offset) & 63) + 4096) >> 9);
+                gc = 12 + ((lut_c((src * spread + color_offset) & 63) + 4096) >> 10);
+                b  = 18 + ((lut_c((src * spread + color_offset) & 63) + 4096) >> 9);
+                break;
+            case OPALO_GRIS:
+                r  = 14 + ((lut_s((src * spread + color_offset) & 63) + 4096) >> 10);
+                gc = 14 + ((lut_s((src * spread + color_offset) & 63) + 4096) >> 10);
+                b  = 14 + ((lut_s((src * spread + color_offset) & 63) + 4096) >> 10);
+                break;
+            default:
+                r  = (lut_s((src * spread + color_offset) & 63) + 4096) >> 8;
+                gc = (lut_s((src * spread * 2 + color_offset) & 63) + 4096) >> 8;
+                b  = (lut_c((src * spread + color_offset) & 63) + 4096) >> 8;
+                break;
+        }
+        if (r  > 31) r  = 31;
+        if (gc > 31) gc = 31;
+        if (b  > 31) b  = 31;
+
+        pal[base + i] = (uint16_t)((r & 31) | ((gc & 31) << 5) | ((b & 31) << 10));
+    }
+}
+
+/* ================================================================
+   ENLACE PARA EL LINKER
+================================================================ */
 void renderizar_gema_celda(int x_pos, int y_pos, const Gema* g, int base, int num_colores) {
     renderizar_opalo_pequeno_celda(x_pos, y_pos, g, base, num_colores);
 }
@@ -428,88 +549,149 @@ void renderizar_gema_celda_vieja(int x_pos, int y_pos, const Gema* g) {
 }
 
 /* ================================================================
-   RENDER PREVIEW — Bug #1 fix
-   Renderiza la gema al buffer software (anim_buf_a) y luego lo
-   vuelca sobre el back buffer con volcar_buf_solo_opalo().
-   Nunca escribe directo al frame visible.
+   RENDER PREVIEW
+   Usa el buffer cacheado si la gema no cambió desde el último
+   renderizar_opalo_grande(). Si cambió, recalcula y actualiza caché.
 ================================================================ */
 void renderizar_gema_preview(int x_pos, int y_pos, const Gema* g) {
     uint8_t* buf = get_anim_buf_a();
-    memset(buf, 0, 240 * 160);
 
-    int a, b;
-    quilates_to_radii(g->quilates, &a, &b);
+    if (cache_pro_dirty(g)) {
+        memset(buf, 0, 240 * 160);
 
-    int a2 = a * a;
-    int b2 = b * b;
-    int a2b2 = a2 * b2;
+        // PESO APARENTE
+        int q = (g->etapa == ETAPA_BRUTA) ? gema_quilates_aparentes(g) : g->quilates;
+        
+        int a, b;
+        quilates_to_radii(q, &a, &b);
 
-    /* Sprint 1: Highlight reducido — aspecto pulido, no plástico */
-    int hx_off = -(a / 4);
-    int hy_off = -(b * 4 / 10);
-    int ha = (a * 4 / 10);
-    int hb = (b * 2 / 10);
-    if (ha < 2) ha = 2; if (hb < 2) hb = 2;
-    int ha2 = ha * ha;
-    int hb2 = hb * hb;
-    int ha2hb2 = ha2 * hb2;
+        int a2 = a * a;
+        int b2 = b * b;
+        int a2b2 = a2 * b2;
 
-    /* Sprint 2: Rim-light — anillo fino en cuadrante superior-izquierdo */
-    int rim_thresh = a2b2 * 92 / 100;
+        int ab = a + 1, bb_r = b + 1;
+        int ab2 = ab * ab, bb2 = bb_r * bb_r;
+        int sombra_dx = 1, sombra_dy = 1;
+        int loop_a = ab + sombra_dx + 1;
+        int loop_b = bb_r + sombra_dy + 1;
 
-    uint8_t off = (uint8_t)(g->seed ^ (g->seed >> 16));
+        int hx_off = -(a / 4);
+        int hy_off = -(b * 4 / 10);
+        int ha = (a * 4 / 10);
+        int hb = (b * 2 / 10);
+        if (ha < 2) ha = 2; if (hb < 2) hb = 2;
+        int ha2 = ha * ha;
+        int hb2 = hb * hb;
+        int ha2hb2 = ha2 * hb2;
 
-    for (int y = -b; y <= b; y++) {
-        int screen_y = y_pos + y;
-        if (screen_y < 0 || screen_y >= 160) continue;
+        uint8_t off = (uint8_t)(g->seed ^ (g->seed >> 16));
 
-        int dy2 = y * y;
-        for (int x = -a; x <= a; x++) {
-            int screen_x = x_pos + x;
-            if (screen_x < 0 || screen_x >= 240) continue;
+        // FACTORES DE FORMA IRREGULAR
+        int k_q1 = 0, k_q2 = 0, k_q3 = 0, k_q4 = 0;
+        if (g->etapa == ETAPA_BRUTA) {
+            k_q1 = 80 + ((g->seed >> 2) % 140);
+            k_q2 = 80 + ((g->seed >> 5) % 140);
+            k_q3 = 80 + ((g->seed >> 8) % 140);
+            k_q4 = 80 + ((g->seed >> 11) % 140);
+        }
 
-            int dx2 = x * x;
-            if (dx2 * b2 + dy2 * a2 <= a2b2) {
-                int src_x = (x + a) * 120 / ((a * 2) + 1);
-                int src_y = (y + b) * 80 / ((b * 2) + 1);
+        for (int y = -loop_b; y <= loop_b; y++) {
+            int screen_y = y_pos + y;
+            if (screen_y < 0 || screen_y >= 160) continue;
 
-                uint8_t color = plasma_pixel_smooth(src_x, src_y, off, g);
+            int dy2 = y * y;
+            for (int x = -loop_a; x <= loop_a; x++) {
+                int screen_x = x_pos + x;
+                if (screen_x < 0 || screen_x >= 240) continue;
 
-                /* Sprint 2: Oscurecimiento radial hacia los bordes */
-                int edge = (dx2 * b2 + dy2 * a2) * 256 / a2b2;
-                if (edge > 180) {
-                    int fade = (edge - 180);
-                    int c = (int)color - (fade >> 1);
-                    color = (c < 16) ? 16 : (uint8_t)c;
+                int dx2 = x * x;
+                int inside_main = 0;
+                int inside_borde = 0;
+                int dist_val = 0;
+
+                if (g->etapa == ETAPA_BRUTA) {
+                    int k = (x > 0) ? ((y > 0) ? k_q1 : k_q4) : ((y > 0) ? k_q2 : k_q3);
+                    int dxdy2 = (x * y) * (x * y);
+                    int subtract = (dxdy2 >> 8) * k;
+                    
+                    dist_val = (dx2 * b2 + dy2 * a2) - subtract;
+                    inside_main = (dist_val <= a2b2);
+                    
+                    int shadow_dx_v = x - sombra_dx;
+                    int shadow_dy_v = y - sombra_dy;
+                    int sk = (shadow_dx_v > 0) ? ((shadow_dy_v > 0) ? k_q1 : k_q4) : ((shadow_dy_v > 0) ? k_q2 : k_q3);
+                    int sdxdy2 = (shadow_dx_v * shadow_dy_v) * (shadow_dx_v * shadow_dy_v);
+                    int sub_s = (sdxdy2 >> 8) * sk;
+                    
+                    int dist_shadow = (shadow_dx_v * shadow_dx_v * bb2 + shadow_dy_v * shadow_dy_v * ab2) - sub_s;
+                    inside_borde = (dist_shadow <= ab2 * bb2);
+                } else {
+                    dist_val = (dx2 * b2 + dy2 * a2);
+                    inside_main = (dist_val <= a2b2);
+
+                    int shadow_dx_v = x - sombra_dx;
+                    int shadow_dy_v = y - sombra_dy;
+                    inside_borde = (shadow_dx_v * shadow_dx_v * bb2 + shadow_dy_v * shadow_dy_v * ab2 <= ab2 * bb2);
                 }
 
-                /* Sprint 1: Destello especular reducido */
-                int hdx = x - hx_off;
-                int hdy = y - hy_off;
-                if ((hb2 * hdx * hdx + ha2 * hdy * hdy) <= ha2hb2) {
-                    color = 254;
-                }
-                /* Sprint 1: Sombra inferior-derecha correcta (oscura, no blanca) */
-                else if ((dx2 * b2 + dy2 * a2) > (a2b2 * 85 / 100) && x >= 1 && y >= 1) {
-                    color = 253;
-                }
-                /* Sprint 2: Rim-light superior-izquierda */
-                else if ((dx2 * b2 + dy2 * a2) > rim_thresh && x <= 0 && y <= 0) {
-                    int c = (int)color + 30;
-                    color = (c > 253) ? 253 : (uint8_t)c;
-                }
+                if (inside_main) {
+                    int src_x = (x + a) * 120 / ((a * 2) + 1);
+                    int src_y = (y + b) * 80  / ((b * 2) + 1);
+                    uint8_t color = plasma_pixel(src_x, src_y, off, g);
 
-                buf[screen_y * 240 + screen_x] = color;
+                    if (g->etapa == ETAPA_BRUTA) {
+                        int ruido = ((x * 17) ^ (y * 31) ^ g->seed) & 31;
+                        if (dist_val > (a2b2 * 65 / 100)) {
+                            if (ruido > 15 && x >= -a/2 && y >= -b/2) {
+                                int cv = (int)color - 20;
+                                color = (cv < 16) ? 16 : (uint8_t)cv;
+                            }
+                        }
+                        if (ruido == 0) {
+                            int cv = (int)color - 15;
+                            color = (cv < 16) ? 16 : (uint8_t)cv;
+                        }
+                    } else {
+                        int edge = dist_val * 256 / a2b2;
+                        if (edge > 180) {
+                            int fade = (edge - 180);
+                            int c = (int)color - (fade >> 1);
+                            color = (c < 16) ? 16 : (uint8_t)c;
+                        }
+
+                        int hdx = x - hx_off;
+                        int hdy = y - hy_off;
+                        if ((hb2 * hdx * hdx + ha2 * hdy * hdy) <= ha2hb2) {
+                            color = 254;
+                        }
+                        else if (dist_val > (a2b2 * 82 / 100) && (x + 1) >= 0 && (y + 1) >= 0) {
+                            int cv = (int)color - 30;
+                            color = (cv < 16) ? 16 : (uint8_t)cv;
+                        }
+                    }
+
+                    buf[screen_y * 240 + screen_x] = color;
+                } else if (inside_borde) {
+                    buf[screen_y * 240 + screen_x] = 255;
+                }
             }
         }
+
+        cache_pro_marcar(g);
     }
 
-    // Volcado sobre el back buffer: solo píxeles no-cero, sin offset
     volcar_buf_solo_opalo(buf, 0);
 }
+/* ================================================================
+   RENDER GEMA (versión simple sin celda)
+================================================================ */
+void renderizar_gema(int x_pos, int y_pos, const Gema* g) {
+    renderizar_opalo_pequeno_celda(x_pos, y_pos, g, 0, 0);
+}
 
-/* ---------------- GENERACIÓN DE PALETAS PARA GEMA ---------------- */
-
+/* ================================================================
+   GENERACIÓN DE PALETAS
+================================================================ */
 void generar_paleta_gema_rango(const Gema* g, int base, int num_colores) {
     uint16_t* pal = (uint16_t*)0x05000000;
 
@@ -521,75 +703,101 @@ void generar_paleta_gema_rango(const Gema* g, int base, int num_colores) {
 
     for (int i = 0; i < num_colores; i++) {
         int src = 16 + (i * 239) / num_colores;
-        int r, g, b;
+        int r, gc, b;
 
         switch (tipo) {
             case OPALO_NEGRO:
                 r = (lut_s((src * spread) + color_offset) + 4096) >> 8;
-                g = (lut_c((src * spread * 2) + color_offset) + 4096) >> 8;
+                gc = (lut_c((src * spread * 2) + color_offset) + 4096) >> 8;
                 b = 26 + ((lut_s((src * spread * 2) + color_offset) + 4096) >> 11);
                 break;
             case OPALO_CRISTAL:
                 r = 20 + ((lut_s((src * spread) + color_offset) + 4096) >> 9);
-                g = 20 + ((lut_c((src * spread) + color_offset) + 4096) >> 9);
+                gc = 20 + ((lut_c((src * spread) + color_offset) + 4096) >> 9);
                 b = 25 + ((lut_c((src * spread) + color_offset) + 4096) >> 9);
                 break;
             case OPALO_FUEGO:
                 r = 28 + ((lut_c((src * spread) + color_offset) + 4096) >> 9);
-                g = (lut_s((src * spread) + color_offset) + 4096) >> 8;
+                gc = (lut_s((src * spread) + color_offset) + 4096) >> 8;
                 b = (lut_c((src * spread) + color_offset) + 4096) >> 10;
                 break;
             case OPALO_ROSA:
                 r = 25 + ((lut_s((src * spread) + color_offset) + 4096) >> 9);
-                g = 15 + ((lut_c((src * spread) + color_offset) + 4096) >> 10);
+                gc = 15 + ((lut_c((src * spread) + color_offset) + 4096) >> 10);
                 b = 20 + ((lut_c((src * spread) + color_offset) + 4096) >> 9);
                 break;
             case OPALO_GRIS:
                 r = 15 + ((lut_s((src * spread) + color_offset) + 4096) >> 10);
-                g = 15 + ((lut_s((src * spread) + color_offset) + 4096) >> 10);
+                gc = 15 + ((lut_s((src * spread) + color_offset) + 4096) >> 10);
                 b = 15 + ((lut_s((src * spread) + color_offset) + 4096) >> 10);
                 break;
             default:
                 r = (lut_s((src * spread) + color_offset) + 4096) >> 8;
-                g = (lut_s((src * spread * 2) + color_offset) + 4096) >> 8;
+                gc = (lut_s((src * spread * 2) + color_offset) + 4096) >> 8;
                 b = (lut_c((src * spread) + color_offset) + 4096) >> 8;
                 break;
         }
 
         if (r > 31) r = 31;
-        if (g > 31) g = 31;
+        if (gc > 31) gc = 31;
         if (b > 31) b = 31;
 
-        pal[base + i] = (r & 31) | ((g & 31) << 5) | ((b & 31) << 10);
+        pal[base + i] = (r & 31) | ((gc & 31) << 5) | ((b & 31) << 10);
     }
 
-    /* Escribir sombras 251/252 con tinte del tipo — mismos valores que generar_paleta_gema.
-     * Son índices globales compartidos por todas las gemas de la rejilla.
-     * La última gema renderizada gana, lo cual es aceptable visualmente. */
     int sh_r, sh_g, sh_b;
     int sh2_r, sh2_g, sh2_b;
     switch (tipo) {
-        case OPALO_NEGRO:
-            sh_r=4;  sh_g=3;  sh_b=8;
-            sh2_r=7; sh2_g=6; sh2_b=12; break;
-        case OPALO_CRISTAL:
-            sh_r=6;  sh_g=6;  sh_b=10;
-            sh2_r=10; sh2_g=10; sh2_b=14; break;
-        case OPALO_FUEGO:
-            sh_r=12; sh_g=4;  sh_b=2;
-            sh2_r=16; sh2_g=7; sh2_b=4; break;
-        case OPALO_BLANCO:
-            sh_r=10; sh_g=10; sh_b=10;
-            sh2_r=14; sh2_g=14; sh2_b=14; break;
-        case OPALO_ROSA:
-            sh_r=14; sh_g=6;  sh_b=10;
-            sh2_r=18; sh2_g=9; sh2_b=14; break;
-        default:
-            sh_r=8;  sh_g=8;  sh_b=9;
-            sh2_r=12; sh2_g=12; sh2_b=13; break;
+        case OPALO_NEGRO:   sh_r=4;  sh_g=3;  sh_b=8;  sh2_r=7;  sh2_g=6;  sh2_b=12; break;
+        case OPALO_CRISTAL: sh_r=6;  sh_g=6;  sh_b=10; sh2_r=10; sh2_g=10; sh2_b=14; break;
+        case OPALO_FUEGO:   sh_r=12; sh_g=4;  sh_b=2;  sh2_r=16; sh2_g=7;  sh2_b=4;  break;
+        case OPALO_BLANCO:  sh_r=10; sh_g=10; sh_b=10; sh2_r=14; sh2_g=14; sh2_b=14; break;
+        case OPALO_ROSA:    sh_r=14; sh_g=6;  sh_b=10; sh2_r=18; sh2_g=9;  sh2_b=14; break;
+        default:            sh_r=8;  sh_g=8;  sh_b=9;  sh2_r=12; sh2_g=12; sh2_b=13; break;
     }
     pal[252] = (sh_r  & 31) | ((sh_g  & 31) << 5) | ((sh_b  & 31) << 10);
     pal[251] = (sh2_r & 31) | ((sh2_g & 31) << 5) | ((sh2_b & 31) << 10);
+}
+
+/* ================================================================
+   SUCIEDAD DE PALETA (Fase 2 → Fase 3)
+
+   Mezcla cada entrada de paleta con un color de fango oscuro según
+   el nivel de suciedad derivado de la seed [0..3].
+   Se aplica en ETAPA_CORTADA sobre la paleta ya generada.
+   En ETAPA_PULIDA no se llama — el jugador ve los colores reales.
+
+   Mezcla: color_sucio = color_real * (8 - peso) / 8
+                        + fango    * peso        / 8
+   donde peso es 1..4 según nivel (1=casi limpia, 4=lodosa).
+
+   Índices afectados: [16..253] — los colores del plasma.
+   Se respetan: pal[0] (transparente), pal[254] (especular),
+               pal[255] (sombra exterior), pal[251..253] (sombras).
+================================================================ */
+static void aplicar_suciedad_paleta(uint16_t *pal, const Gema *g)
+{
+    /* peso en [1..4]: nivel 0→1, nivel 1→2, nivel 2→3, nivel 3→4 */
+    uint8_t nivel = gema_suciedad(g);
+    int peso = (int)nivel + 1;   /* [1..4] sobre una escala de 8 */
+
+    /* Color de fango: gris terroso oscuro (R=10, G=8, B=6) en BGR555 */
+    int fango_r = 10;
+    int fango_g =  8;
+    int fango_b =  6;
+
+    for (int i = 16; i < 251; i++) {
+        uint16_t c = pal[i];
+        int r = ( c        & 31);
+        int g = ((c >>  5) & 31);
+        int b = ((c >> 10) & 31);
+
+        r = (r * (8 - peso) + fango_r * peso) >> 3;
+        g = (g * (8 - peso) + fango_g * peso) >> 3;
+        b = (b * (8 - peso) + fango_b * peso) >> 3;
+
+        pal[i] = (uint16_t)((r & 31) | ((g & 31) << 5) | ((b & 31) << 10));
+    }
 }
 
 void generar_paleta_gema(const Gema* g) {
@@ -597,50 +805,55 @@ void generar_paleta_gema(const Gema* g) {
 
     TipoOpalo tipo = gema_tipo(g);
     uint8_t iridiscencia = gema_iridiscencia(g);
-    uint8_t brillo       = gema_brillo(g);
     uint8_t color_offset = (uint8_t)(g->seed & 0xFF);
+
+    // CORREGIDO: Extraemos los atributos calculados para evitar que los destellos 
+    // visuales revelen el brillo real antes de limpiar o tasar la gema.
+    AtributosGema attr;
+    gema_calcular_atributos(g, &attr);
+    uint8_t brillo = attr.brillo_aparente; 
 
     int spread = 1 + (iridiscencia / 8);
 
     for (int i = 16; i < 254; i++) {
-        int r, g, b;
+        int r, gc, b;
         switch (tipo) {
             case OPALO_NEGRO:
                 r = (lut_s((i * spread) + color_offset) + 4096) >> 8;
-                g = (lut_c((i * spread * 2) + color_offset) + 4096) >> 8;
+                gc = (lut_c((i * spread * 2) + color_offset) + 4096) >> 8;
                 b = 26 + ((lut_s((i * spread * 2) + color_offset) + 4096) >> 11);
                 break;
             case OPALO_CRISTAL:
                 r = 20 + ((lut_s((i * spread) + color_offset) + 4096) >> 9);
-                g = 20 + ((lut_c((i * spread) + color_offset) + 4096) >> 9);
+                gc = 20 + ((lut_c((i * spread) + color_offset) + 4096) >> 9);
                 b = 25 + ((lut_c((i * spread) + color_offset) + 4096) >> 9);
                 break;
             case OPALO_FUEGO:
                 r = 28 + ((lut_c((i * spread) + color_offset) + 4096) >> 9);
-                g = (lut_s((i * spread) + color_offset) + 4096) >> 8;
+                gc = (lut_s((i * spread) + color_offset) + 4096) >> 8;
                 b = (lut_c((i * spread) + color_offset) + 4096) >> 10;
                 break;
             case OPALO_ROSA:
                 r = 25 + ((lut_s((i * spread) + color_offset) + 4096) >> 9);
-                g = 15 + ((lut_c((i * spread) + color_offset) + 4096) >> 10);
+                gc = 15 + ((lut_c((i * spread) + color_offset) + 4096) >> 10);
                 b = 20 + ((lut_c((i * spread) + color_offset) + 4096) >> 9);
                 break;
             case OPALO_GRIS:
                 r = 15 + ((lut_s((i * spread) + color_offset) + 4096) >> 10);
-                g = 15 + ((lut_s((i * spread) + color_offset) + 4096) >> 10);
+                gc = 15 + ((lut_s((i * spread) + color_offset) + 4096) >> 10);
                 b = 15 + ((lut_s((i * spread) + color_offset) + 4096) >> 10);
                 break;
             default:
                 r = (lut_s((i * spread) + color_offset) + 4096) >> 8;
-                g = (lut_s((i * spread * 2) + color_offset) + 4096) >> 8;
+                gc = (lut_s((i * spread * 2) + color_offset) + 4096) >> 8;
                 b = (lut_c((i * spread) + color_offset) + 4096) >> 8;
                 break;
         }
-        if (r > 31) r = 31; if (g > 31) g = 31; if (b > 31) b = 31;
-        pal[i] = (r & 31) | ((g & 31) << 5) | ((b & 31) << 10);
+        if (r > 31) r = 31; if (gc > 31) gc = 31; if (b > 31) b = 31;
+        pal[i] = (r & 31) | ((gc & 31) << 5) | ((b & 31) << 10);
     }
 
-    // Lógica del borde basada en el brillo dinámico
+    // A partir de aquí todo el código original usa la variable 'brillo' corregida:
     int borde_v = 24 + ((brillo - 16) * 4 / 15);
     int tinte = (color_offset & 3) - 1;
     int borde_r = borde_v + tinte;
@@ -649,66 +862,84 @@ void generar_paleta_gema(const Gema* g) {
     if (borde_b > 30) borde_b = 30; if (borde_b < 22) borde_b = 22;
     pal[15] = (borde_r & 31) | ((borde_v & 31) << 5) | ((borde_b & 31) << 10);
 
-    // Lógica del Brillo/Highlight basada en el brillo dinámico
+    // ================================================================
+    // CÁLCULO DE HIGHLIGHTS ESPECULARES (CORREGIDO)
+    // ================================================================
     int hl_base = 29 + ((brillo - 16) * 3 / 15);
+    
+    // Control preventivo sobre la base
+    if (hl_base > 31) hl_base = 31;
+    if (hl_base < 0)  hl_base = 0;
+
     int hl_r, hl_g, hl_b;
     switch (tipo) {
-        case OPALO_CRISTAL: hl_r = 31; hl_g = 31; hl_b = 31; break;
+        case OPALO_CRISTAL: 
+            hl_r = 31; hl_g = 31; hl_b = 31; 
+            break;
         case OPALO_FUEGO:
-            /* Siempre blanco cálido. hl_b mínimo 27 para que nunca
-             * derive a rojo aunque el brillo de la gema sea bajo.   */
-            hl_r = 31;
-            hl_g = 31;
+            hl_r = 31; 
+            hl_g = 30; // Un pelín menos de verde para un destello cálido
             hl_b = 27 + ((brillo - 16) * 4 / 15);
-            if (hl_b > 31) hl_b = 31;
             break;
         case OPALO_NEGRO:
-            hl_r = hl_base - 2; hl_g = hl_base - 1; hl_b = hl_base;
-            if (hl_r < 30) hl_r = 30;
+            hl_r = hl_base - 2; 
+            hl_g = hl_base - 1; 
+            hl_b = hl_base; // Destello con tinte azulado/frío
             break;
         case OPALO_ROSA:
             hl_r = 31;
-            hl_g = 25 + ((brillo - 16) * 4 / 15);
+            hl_g = 26 + ((brillo - 16) * 3 / 15); // Suavizado
             hl_b = 30;
             break;
         case OPALO_GRIS:
             hl_r = hl_base; hl_g = hl_base; hl_b = hl_base;
             break;
-        default:
-            hl_r = hl_base; hl_g = hl_base - 1; hl_b = hl_base - 2;
-            if (hl_g < 30) hl_g = 30;
-            if (hl_b < 30) hl_b = 30;
+        default: // Ópalo Blanco y otros
+            hl_r = hl_base; 
+            hl_g = hl_base - 1; 
+            hl_b = hl_base - 2;
             break;
     }
-    pal[254] = (hl_r & 31) | ((hl_g & 31) << 5) | ((hl_b & 31) << 10);
 
-    /* Sombra inferior-derecha: tonos oscurecidos del color propio del ópalo.
-     * 251 = capa interior (más suave), 252 = capa exterior (más oscura).
-     * Nunca negro puro — siempre con tinte del tipo de gema.            */
-    int sh_r, sh_g, sh_b;    /* capa exterior — más oscura  */
-    int sh2_r, sh2_g, sh2_b; /* capa interior — más suave  */
+    // REGLA DE CONTROL 1: Clamping real para erradicar desbordamientos
+    if (hl_r > 31) hl_r = 31; else if (hl_r < 0) hl_r = 0;
+    if (hl_g > 31) hl_g = 31; else if (hl_g < 0) hl_g = 0;
+    if (hl_b > 31) hl_b = 31; else if (hl_b < 0) hl_b = 0;
+
+    // REGLA DE CONTROL 2: Suelo estético anti-saturación (min 24)
+    if (hl_r < 24) hl_r = 24;
+    if (hl_g < 24) hl_g = 24;
+    if (hl_b < 24) hl_b = 24;
+
+    // Inserción segura sin usar máscara binaria (& 31)
+    pal[254] = hl_r | (hl_g << 5) | (hl_b << 10);
+
+    // ================================================================
+    // SOMBRAS
+    // ================================================================
+    int sh_r, sh_g, sh_b;
+    int sh2_r, sh2_g, sh2_b;
     switch (tipo) {
-        case OPALO_NEGRO:
-            sh_r=4;  sh_g=3;  sh_b=8;
-            sh2_r=7; sh2_g=6; sh2_b=12; break;
-        case OPALO_CRISTAL:
-            sh_r=6;  sh_g=6;  sh_b=10;
-            sh2_r=10; sh2_g=10; sh2_b=14; break;
-        case OPALO_FUEGO:
-            sh_r=12; sh_g=4;  sh_b=2;
-            sh2_r=16; sh2_g=7; sh2_b=4; break;
-        case OPALO_BLANCO:
-            sh_r=10; sh_g=10; sh_b=10;
-            sh2_r=14; sh2_g=14; sh2_b=14; break;
-        case OPALO_ROSA:
-            sh_r=14; sh_g=6;  sh_b=10;
-            sh2_r=18; sh2_g=9; sh2_b=14; break;
-        default: /* GRIS y resto */
-            sh_r=8;  sh_g=8;  sh_b=9;
-            sh2_r=12; sh2_g=12; sh2_b=13; break;
+        case OPALO_NEGRO:   sh_r=4;  sh_g=3;  sh_b=8;  sh2_r=7;  sh2_g=6;  sh2_b=12; break;
+        case OPALO_CRISTAL: sh_r=6;  sh_g=6;  sh_b=10; sh2_r=10; sh2_g=10; sh2_b=14; break;
+        case OPALO_FUEGO:   sh_r=12; sh_g=4;  sh_b=2;  sh2_r=16; sh2_g=7;  sh2_b=4;  break;
+        case OPALO_BLANCO:  sh_r=10; sh_g=10; sh_b=10; sh2_r=14; sh2_g=14; sh2_b=14; break;
+        case OPALO_ROSA:    sh_r=14; sh_g=6;  sh_b=10; sh2_r=18; sh2_g=9;  sh2_b=14; break;
+        default:            sh_r=8;  sh_g=8;  sh_b=9;  sh2_r=12; sh2_g=12; sh2_b=13; break;
     }
+    
+    // Aquí sí se puede mantener el & 31 por limpieza, ya que los valores asignados arriba están totalmente controlados
     pal[252] = (sh_r  & 31) | ((sh_g  & 31) << 5) | ((sh_b  & 31) << 10);
     pal[251] = (sh2_r & 31) | ((sh2_g & 31) << 5) | ((sh2_b & 31) << 10);
-    pal[253] = (sh2_r & 31) | ((sh2_g & 31) << 5) | ((sh2_b & 31) << 10); /* Sombra render_pro — mismo tinte que miniaturas */
-    pal[255] = 0x4210; /* Texto / Sombras oscuras */
+    pal[253] = (sh2_r & 31) | ((sh2_g & 31) << 5) | ((sh2_b & 31) << 10);
+    pal[255] = 0x4210;
+
+    /* ----------------------------------------------------------------
+       SUCIEDAD (Fase 2): distorsiona la paleta generada hacia un tono
+       terroso oscuro. En Fase 3 no se aplica — los colores reales
+       quedan al descubierto al pulir la gema.
+    ---------------------------------------------------------------- */
+    if (g->etapa == ETAPA_CORTADA) {
+        aplicar_suciedad_paleta(pal, g);
+    }
 }

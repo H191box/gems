@@ -10,6 +10,11 @@ extern uint8_t grieta_buf[160][240];
 // --- FUNCIONES PRINCIPALES DE RENDERIZADO (BUFFER LÓGICO) ---
 void renderizar_gema_a_buffer(uint8_t *buffer, int w, int h, const Gema *g);
 void renderizar_opalo_pro(uint8_t *buffer, int w, int h, const Gema *g);
+
+/* Renders de tamaño fijo con caché dirty — solo recalcula si cambia la gema */
+void renderizar_opalo_grande(uint8_t *buf, const Gema *g);   /* 240x160 */
+void renderizar_opalo_mediano(uint8_t *buf, const Gema *g);  /* 120x80  */
+void renderizar_opalo_pequeno(uint8_t *buf, const Gema *g);  /* 80x80   */
 void renderizar_transicion(uint8_t *buf_sal, uint8_t *buf_ent, int progreso);
 
 void renderizar_gema_preview(int x_pos, int y_pos, const Gema* g);
@@ -17,6 +22,10 @@ void renderizar_gema_preview(int x_pos, int y_pos, const Gema* g);
 
 
 void generar_paleta_gema(const Gema* g);
+
+/* Genera num_colores entradas de paleta en pal[base..base+num_colores-1].
+ * Para G2/G3: cada gema tiene su banco propio sin interferir con las demás. */
+void generar_paleta_banco(const Gema *g, int base, int num_colores);
 void generar_paleta_gema_rango(const Gema* g, int base, int num_colores);
 
 

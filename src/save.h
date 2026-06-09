@@ -42,7 +42,7 @@ void sram_leer_gema(Gema *g, uint32_t offset);
 
 #define MAX_GALERIA    32
 #define MAX_GALERIA2    9   /* vitrina fija 3x3 */
-#define MAX_GALERIA3   32
+#define MAX_GALERIA3   32   /* rejilla muestra top 9; resto es reserva en SRAM */
 #define MAX_TALLER     64
 
 /* ------------------------------------------------------------------ */
