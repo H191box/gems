@@ -2,6 +2,7 @@
 #define GAME_STATE_H
 
 typedef enum { 
+    ESTADO_TITULO,
     ESTADO_MENU, 
     ESTADO_FARMEO,
     ESTADO_MINA,      
@@ -9,7 +10,8 @@ typedef enum {
     ESTADO_GALERIA, 
     ESTADO_SELECTOR, 
     ESTADO_VIAJAR,
-    ESTADO_TIENDA 
+    ESTADO_TIENDA,
+    ESTADO_CAJAS
 } EstadoJuego;
 
 #endif

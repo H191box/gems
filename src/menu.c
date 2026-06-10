@@ -9,6 +9,7 @@
 #include "game_state.h"
 // ELIMINADOS: mina.h y taller.h ya no se incluyen
 #include "galeria.h"
+#include "menu_cajas.h"
 #include "tienda.h"
 #include "viajar.h"
 #include "ciudades.h"
@@ -53,7 +54,7 @@ void dibujar_menu(int opcion) {
     vline(vram, 115, 12, 160, 4);
 
     // Reducido a 4 opciones fijas
-    const char* opciones_txt[] = {"GALERIA", "VITRINA", "TIENDA", "VIAJAR"};
+    const char* opciones_txt[] = {"GALERIA", "CAJAS", "TIENDA", "VIAJAR"};
     for (int i = 0; i < 4; i++) {
         // Al tener menos opciones, les damos un poco más de aire vertical (espaciado de 20px)
         int y = 20 + (i * 20);  
@@ -71,7 +72,7 @@ void dibujar_menu(int opcion) {
     // Descripciones sincronizadas con las 4 opciones restantes
     const char* desc_txt[] = {
         "TUS OPALOS",
-        "OPALOS ESPECIALES",
+        "FILTROS DE COLECCION",
         "COMPRAR SACOS",
         "CAMBIAR ZONA"
     };
@@ -103,9 +104,8 @@ void menu_input(uint16_t keys) {
             galeria_init();
             break;
         case 1:
-           
-            estado = ESTADO_GALERIA;
-            galeria_init();
+            estado = ESTADO_CAJAS;
+            menu_cajas_init();
             break;
         case 2: estado = ESTADO_TIENDA;  tienda_init();  break;
         case 3: estado = ESTADO_VIAJAR;  viajar_init();  break;

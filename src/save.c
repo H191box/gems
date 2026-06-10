@@ -1,27 +1,28 @@
+/* save.c */
 #include <stdint.h>
 #include "save.h"
-
 #include "data.h"
 #include "gema.h"
+#include "caja_filtro.h"
 
-#define SRAM_BASE ((uint8_t *)0x0E000000)
+#define SRAM_BASE  ((uint8_t *)0x0E000000)
 
-#define SAVE_MAGIC    "OPAL"
-#define SAVE_VERSION  12   /* MAX_GALERIA3 ampliado a 32 */
-
-/* ------------------------------------------------------------------ */
-/* TAMAÑO Y OFFSETS SRAM                                              */
-/* ------------------------------------------------------------------ */
-
-#define GEMA_SIZE     8
-#define SRAM_HEADER   0x0000
-#define SRAM_GAL1     0x0040
-#define SRAM_GAL2     0x0200
-#define SRAM_GAL3     0x0300
-#define SRAM_DINERO   0x1000
+#define SAVE_VERSION  13   /* pool único + cajas */
 
 /* ------------------------------------------------------------------ */
-/* ACCESO SRAM — bajo nivel                                           */
+/* Offsets SRAM                                                        */
+/* ------------------------------------------------------------------ */
+
+#define SRAM_HEADER   0x0000   /*   64 B  — SaveHeader              */
+#define SRAM_POOL     0x0040   /* 4000 B  — 500 gemas × 8 bytes     */
+#define SRAM_FILTROS  0x0FE0   /*   64 B  — 8 CajaFiltro × 8 bytes  */
+#define SRAM_GAL3     0x1020   /*  256 B  — 32 gemas × 8 bytes      */
+#define SRAM_DINERO   0x1120   /*    4 B                             */
+
+#define GEMA_SIZE  8
+
+/* ------------------------------------------------------------------ */
+/* Acceso SRAM bajo nivel                                              */
 /* ------------------------------------------------------------------ */
 
 static void sram_read(void *dst, const void *src, uint32_t size)
@@ -39,7 +40,7 @@ static void sram_write(void *dst, const void *src, uint32_t size)
 }
 
 /* ------------------------------------------------------------------ */
-/* HEADER                                                             */
+/* Header                                                              */
 /* ------------------------------------------------------------------ */
 
 void leer_header(SaveHeader *h)
@@ -56,14 +57,13 @@ static int save_valido(void)
 {
     SaveHeader h;
     sram_read(&h, SRAM_BASE + SRAM_HEADER, sizeof(SaveHeader));
-
     return h.magic[0] == 'O' && h.magic[1] == 'P' &&
            h.magic[2] == 'A' && h.magic[3] == 'L' &&
            h.version  == SAVE_VERSION;
 }
 
 /* ------------------------------------------------------------------ */
-/* INIT                                                               */
+/* Init                                                                */
 /* ------------------------------------------------------------------ */
 
 void save_init(void)
@@ -76,11 +76,15 @@ void save_init(void)
         SaveHeader h = {0};
         h.magic[0] = 'O'; h.magic[1] = 'P';
         h.magic[2] = 'A'; h.magic[3] = 'L';
-        h.version    = SAVE_VERSION;
-        h.num_gal    = 0;
-        h.num_gal2   = 0;
-        h.num_gal3   = 0;
+        h.version  = SAVE_VERSION;
+        h.num_pool = 0;
+        h.num_gal3 = 0;
         escribir_header(&h);
+
+        /* Filtros vacíos — caja vacía acepta todo */
+        CajaFiltro filtros_vacios[NUM_CAJAS] = {0};
+        sram_write(SRAM_BASE + SRAM_FILTROS, filtros_vacios,
+                   sizeof(filtros_vacios));
 
         uint32_t dinero = 500;
         sram_write(SRAM_BASE + SRAM_DINERO, &dinero, 4);
@@ -88,7 +92,7 @@ void save_init(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* SEED                                                               */
+/* Seed                                                                */
 /* ------------------------------------------------------------------ */
 
 void guardar_seed(uint32_t seed)
@@ -105,7 +109,7 @@ uint32_t cargar_seed(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* HELPERS — serialización gemas                                      */
+/* Helpers serialización                                               */
 /* ------------------------------------------------------------------ */
 
 static void sram_escribir_gema(uint32_t offset, const Gema *g)
@@ -123,81 +127,50 @@ void sram_leer_gema(Gema *g, uint32_t offset)
 }
 
 /* ------------------------------------------------------------------ */
-/* GALERÍAS                                                           */
+/* Pool principal                                                      */
 /* ------------------------------------------------------------------ */
 
-// Galería 1
-int cargar_gemas(Gema *slots)
+int cargar_pool(Gema *slots)
 {
     save_init();
     SaveHeader h; leer_header(&h);
-    if (h.num_gal > MAX_GALERIA) h.num_gal = 0;   /* FIX: SRAM corrupta */
-    for (uint32_t i = 0; i < h.num_gal; i++)
-        sram_leer_gema(&slots[i], SRAM_GAL1 + i * GEMA_SIZE);
-    return (int)h.num_gal;
+    if (h.num_pool > MAX_POOL) h.num_pool = 0;
+    for (uint32_t i = 0; i < h.num_pool; i++)
+        sram_leer_gema(&slots[i], SRAM_POOL + i * GEMA_SIZE);
+    return (int)h.num_pool;
 }
 
-void guardar_gema(const Gema *g)
+void guardar_gema_pool(const Gema *g)
 {
     save_init();
     SaveHeader h; leer_header(&h);
-    if (h.num_gal >= MAX_GALERIA) return;
-    sram_escribir_gema(SRAM_GAL1 + h.num_gal * GEMA_SIZE, g);
-    h.num_gal++;
+    if (h.num_pool >= MAX_POOL) return;
+    sram_escribir_gema(SRAM_POOL + h.num_pool * GEMA_SIZE, g);
+    h.num_pool++;
     escribir_header(&h);
 }
 
-void actualizar_gema_en_sram(int i, const Gema *g)
+void actualizar_gema_pool(int i, const Gema *g)
 {
-    sram_escribir_gema(SRAM_GAL1 + (uint32_t)i * GEMA_SIZE, g);
+    sram_escribir_gema(SRAM_POOL + (uint32_t)i * GEMA_SIZE, g);
 }
 
-void decrementar_num_gemas(void)
+void decrementar_pool(void)
 {
     SaveHeader h; leer_header(&h);
-    if (h.num_gal > 0) h.num_gal--;
+    if (h.num_pool > 0) h.num_pool--;
     escribir_header(&h);
 }
 
-// Galería 2
-int cargar_gemas_galeria2(Gema *slots)
-{
-    save_init();
-    SaveHeader h; leer_header(&h);
-    if (h.num_gal2 > MAX_GALERIA2) h.num_gal2 = 0;   /* FIX: SRAM corrupta */
-    for (uint32_t i = 0; i < h.num_gal2; i++)
-        sram_leer_gema(&slots[i], SRAM_GAL2 + i * GEMA_SIZE);
-    return (int)h.num_gal2;
-}
+/* ------------------------------------------------------------------ */
+/* G3 — mercado                                                        */
+/* ------------------------------------------------------------------ */
 
-void guardar_gema_galeria2(const Gema *g)
-{
-    save_init();
-    SaveHeader h; leer_header(&h);
-    if (h.num_gal2 >= MAX_GALERIA2) return;
-    sram_escribir_gema(SRAM_GAL2 + h.num_gal2 * GEMA_SIZE, g);
-    h.num_gal2++;
-    escribir_header(&h);
-}
-
-void actualizar_gema_galeria2(int i, const Gema *g)
-{
-    sram_escribir_gema(SRAM_GAL2 + (uint32_t)i * GEMA_SIZE, g);
-}
-
-void decrementar_num_gemas_galeria2(void)
-{
-    SaveHeader h; leer_header(&h);
-    if (h.num_gal2 > 0) h.num_gal2--;
-    escribir_header(&h);
-}
-
-// Galería 3
 int cargar_gemas_galeria3(Gema *slots)
 {
     save_init();
     SaveHeader h; leer_header(&h);
-    if (h.num_gal3 > MAX_GALERIA3) h.num_gal3 = 0;   /* FIX: SRAM corrupta */
+    if (h.num_gal3 > MAX_GALERIA3) h.num_gal3 = 0;
     for (uint32_t i = 0; i < h.num_gal3; i++)
         sram_leer_gema(&slots[i], SRAM_GAL3 + i * GEMA_SIZE);
     return (int)h.num_gal3;
@@ -226,7 +199,23 @@ void decrementar_num_gemas_galeria3(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* ECONOMÍA Y ESTADO MUNDIAL                                          */
+/* Filtros de cajas                                                    */
+/* ------------------------------------------------------------------ */
+
+void guardar_cajas(const CajaFiltro cajas[NUM_CAJAS])
+{
+    sram_write(SRAM_BASE + SRAM_FILTROS, cajas,
+               (uint32_t)(NUM_CAJAS * sizeof(CajaFiltro)));
+}
+
+void cargar_cajas(CajaFiltro cajas[NUM_CAJAS])
+{
+    sram_read(cajas, SRAM_BASE + SRAM_FILTROS,
+              (uint32_t)(NUM_CAJAS * sizeof(CajaFiltro)));
+}
+
+/* ------------------------------------------------------------------ */
+/* Economía                                                            */
 /* ------------------------------------------------------------------ */
 
 uint32_t obtener_dinero(void)
@@ -239,7 +228,7 @@ uint32_t obtener_dinero(void)
 void modificar_dinero(int32_t cantidad)
 {
     uint32_t d = obtener_dinero();
-    int32_t r  = (int32_t)d + cantidad;
+    int32_t  r = (int32_t)d + cantidad;
     if (r < 0) r = 0;
     sram_write(SRAM_BASE + SRAM_DINERO, &r, 4);
 }

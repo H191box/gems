@@ -4,8 +4,9 @@
 #include <gba_timers.h>
 #include "video.h"
 #include "menu.h"
-// ELIMINADOS: mina.h y taller.h ya no se incluyen
+#include "titulo.h"      /* <-- NUEVO */
 #include "galeria.h"
+#include "menu_cajas.h"
 #include "tienda.h"
 #include "viajar.h"
 #include "game_state.h"
@@ -14,18 +15,17 @@
 #include "ciudades.h"
 
 // ============================================================
-// DEFINICIÓN DE VARIABLES GLOBALES (Estado del Juego y Mundo)
+// ESTADO GLOBAL
 // ============================================================
-EstadoJuego estado = ESTADO_MENU;
+EstadoJuego estado = ESTADO_TITULO;   /* arranca en portada */
 
-
-// ----------------------------------------------------
-// GENERADOR DE SEMILLA CON ENTROPÍA REAL
-// ----------------------------------------------------
+// ============================================================
+// GENERADOR DE SEMILLA
+// ============================================================
 static uint32_t generar_semilla_inicial(void) {
-    REG_TM0CNT_H = 0;          // parar y resetear
+    REG_TM0CNT_H = 0;
     REG_TM0CNT_L = 0;
-    REG_TM0CNT_H = (1 << 7);   // arrancar
+    REG_TM0CNT_H = (1 << 7);
 
     uint16_t t1 = REG_TM0CNT_L;
     uint16_t vc = REG_VCOUNT;
@@ -34,7 +34,6 @@ static uint32_t generar_semilla_inicial(void) {
 
     uint32_t prev = cargar_seed();
 
-    // Mezclar las fuentes de hardware para aleatoriedad real
     uint32_t s = prev;
     s ^= (uint32_t)t1 << 16;
     s ^= (uint32_t)vc << 8;
@@ -47,52 +46,55 @@ static uint32_t generar_semilla_inicial(void) {
     return s;
 }
 
-// ----------------------------------------------------
-// PUNTO DE ENTRADA PRINCIPAL
-// ----------------------------------------------------
-int main() {
-    // Configurar el modo de vídeo (Modo 4 indexado con Doble Buffer)
+// ============================================================
+// PUNTO DE ENTRADA
+// ============================================================
+int main(void) {
     REG_DISPCNT = MODE_4 | BG2_ENABLE;
 
-    // 1. Inicializar la SRAM y comprobar si hay partida guardada válida.
-    // ¡Sincronización crítica! Al ejecutarse, rellenará automáticamente 
-    // dia_actual, mes_actual, pos_x, pos_y y ciudad_actual_idx con los datos guardados.
+    /* 1. SRAM / save */
     save_init();
 
-    // 2. Generar semilla con entropía para el sistema global de gacha
+    /* 2. Semilla */
     uint32_t semilla = generar_semilla_inicial();
     guardar_seed(semilla);
-    // ELIMINADO: mina_init_semilla(semilla); ya no es necesario
-
     sync_save_world_state();
 
-    // 3. Cargar entorno visual basándose en la ciudad recuperada de la SRAM
+    /* 3. Portada — bloquea aquí hasta que el jugador pulse START */
+    titulo_init();
+    while (titulo_update() == 0) {
+        /* vsync: el bucle de la portada no necesita hacer nada más;
+           titulo_update() ya llama a flip() en los frames de parpadeo.
+           En frames intermedios solo esperamos el barrido. */
+        while (REG_VCOUNT >= 160);
+        while (REG_VCOUNT < 160);
+    }
+    titulo_free();
+
+    /* 4. Transición a menú principal */
+    fade_out();
     aplicar_paleta_segun_bioma(ciudad_actual_idx);
     dibujar_menu(0);
-    flip();      /* presentar el menú antes del fade */
+    flip();
     fade_in();
-    
-    
+    estado = ESTADO_MENU;
 
-    // 4. Bucle principal del juego (Game Loop)
+    /* 5. Bucle principal */
     while (1) {
         scanKeys();
         uint16_t keys = keysDown();
 
-        // Enrutar los inputs según el estado actual reducido del juego
-        switch (estado) {
-            case ESTADO_MENU:    menu_input(keys);    break;
-            // ELIMINADOS: ESTADO_MINA, ESTADO_FARMEO y ESTADO_TALLER ya no interceptan inputs
-            case ESTADO_TIENDA:  tienda_input(keys);  break;
-            case ESTADO_GALERIA: galeria_input(keys); break;
-            case ESTADO_VIAJAR:  viajar_input(keys);  break;
+          switch (estado) {
+            case ESTADO_MENU:    menu_input(keys);       break;
+            case ESTADO_TIENDA:  tienda_input(keys);     break;
+            case ESTADO_GALERIA: galeria_input(keys);    break;
+            case ESTADO_VIAJAR:  viajar_input(keys);     break;
+            case ESTADO_CAJAS:   menu_cajas_input(keys); break;
             default: break;
         }
 
-        // Sincronización de refresco Vertical (VBlank) 
-        // Evita el screen tearing (pantalla partida) y ralentiza el bucle a 60 FPS estables
-         while (REG_VCOUNT >= 160);
-         while (REG_VCOUNT < 160);
+        while (REG_VCOUNT >= 160);
+        while (REG_VCOUNT < 160);
     }
 
     return 0;

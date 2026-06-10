@@ -85,6 +85,31 @@ void quilates_to_radii(uint16_t quilates, int* out_a, int* out_b) {
     *out_b = b;
 }
 
+/* quilates_to_radii_pro — versión para vista pantalla completa (240x160).
+   A 200 quilates el ópalo llega a 5px del margen superior e inferior,
+   es decir b_max = 80 - 5 = 75. El resto de quilates escalan linealmente
+   desde un mínimo de b=10 para gemas muy pequeñas.
+   Relación a/b fija: a = b * 100 / 65 (misma proporción que la normal). */
+static void quilates_to_radii_pro(uint16_t quilates, int* out_a, int* out_b)
+{
+    int q = quilates;
+    if (q < 1)   q = 1;
+    if (q > 225) q = 225;
+
+    /* Escala lineal: q=1 → b=10, q=200 → b=75 */
+    int b = 10 + ((q - 1) * 65) / 199;
+    if (b > 75) b = 75;
+
+    /* a mantiene la proporción 100:65 */
+    int a = (b * 100 + 32) / 65;
+
+    /* Clamp horizontal: no sobrepasar 115px del centro (margen 5px a cada lado) */
+    if (a > 115) a = 115;
+
+    *out_a = a;
+    *out_b = b;
+}
+
 /* ================================================================
    MOTOR DE RENDERIZADO PRO (Dinámico)
 
@@ -100,9 +125,14 @@ void renderizar_opalo_pro(uint8_t *buffer, int w, int h, const Gema *g)
 {
     // SISTEMA DE PESO APARENTE: La roca se dibujará más grande o pequeña de lo real en Fase 1
     int q = (g->etapa == ETAPA_BRUTA) ? gema_quilates_aparentes(g) : g->quilates;
-    
+
     int a, b;
-    quilates_to_radii(q, &a, &b);
+    /* Vista pantalla completa: escalar para aprovechar todo el espacio.
+       Para tamaños menores (preview, celdas) usar la escala compacta normal. */
+    if (w == 240 && h == 160)
+        quilates_to_radii_pro((uint16_t)q, &a, &b);
+    else
+        quilates_to_radii((uint16_t)q, &a, &b);
 
     int a2 = a * a;
     int b2 = b * b;
@@ -158,20 +188,29 @@ void renderizar_opalo_pro(uint8_t *buffer, int w, int h, const Gema *g)
             int dist_val = 0;
 
             if (g->etapa == ETAPA_BRUTA) {
-                // Cálculo de deformación tipo patata
+                /* Deformación tipo patata — squircle asimétrico por cuadrantes.
+                   Para evitar desborde int32 con radios grandes (vista pro),
+                   el término de deformación se calcula en espacio reducido:
+                   se dividen dx y dy entre 2 antes de elevar al cuadrado,
+                   lo que reduce el producto 16x y lo mantiene dentro de int32
+                   incluso con a=115, b=75. El factor k se ajusta (*4) para
+                   compensar la reducción y conservar la forma visual. */
                 int k = (dx > 0) ? ((dy > 0) ? k_q1 : k_q4) : ((dy > 0) ? k_q2 : k_q3);
-                int dxdy2 = (dx * dy) * (dx * dy);
-                int subtract = (dxdy2 >> 8) * k;
-                
+                int dxs = dx >> 1;
+                int dys = dy >> 1;
+                int dxdy2 = (dxs * dys) * (dxs * dys);   /* máx ~(58*40)^2 = 5.382.400 — seguro */
+                int subtract = (dxdy2 >> 6) * k;          /* >>6 en lugar de >>8, compensa el /4 */
+
                 dist_val = (dx2 * b2 + dy2 * a2) - subtract;
                 inside_main = (dist_val <= a2b2);
-                
-                // Aplicar la misma deformación a la sombra
+
                 int sdx = dx - shadow_off_x;
                 int sdy = dy - shadow_off_y;
                 int sk = (sdx > 0) ? ((sdy > 0) ? k_q1 : k_q4) : ((sdy > 0) ? k_q2 : k_q3);
-                int sdxdy2 = (sdx * sdy) * (sdx * sdy);
-                int sub_s = (sdxdy2 >> 8) * sk;
+                int sdxs = sdx >> 1;
+                int sdys = sdy >> 1;
+                int sdxdy2 = (sdxs * sdys) * (sdxs * sdys);
+                int sub_s = (sdxdy2 >> 6) * sk;
                 inside_shadow = ((sdx * sdx * sb2 + sdy * sdy * sa2) - sub_s <= sa2sb2);
             } else {
                 dist_val = (dx2 * b2 + dy2 * a2);
@@ -760,31 +799,45 @@ void generar_paleta_gema_rango(const Gema* g, int base, int num_colores) {
 }
 
 /* ================================================================
-   SUCIEDAD DE PALETA (Fase 2 → Fase 3)
+   SUCIEDAD DE PALETA (Fase 1 y Fase 2)
 
-   Mezcla cada entrada de paleta con un color de fango oscuro según
+   Mezcla cada color del plasma hacia un blanco lechoso según
    el nivel de suciedad derivado de la seed [0..3].
-   Se aplica en ETAPA_CORTADA sobre la paleta ya generada.
-   En ETAPA_PULIDA no se llama — el jugador ve los colores reales.
 
-   Mezcla: color_sucio = color_real * (8 - peso) / 8
-                        + fango    * peso        / 8
-   donde peso es 1..4 según nivel (1=casi limpia, 4=lodosa).
+   Se aplica en ETAPA_BRUTA y ETAPA_CORTADA.
+   En ETAPA_PULIDA no se llama — los colores reales quedan al
+   descubierto al pulir la gema.
 
-   Índices afectados: [16..253] — los colores del plasma.
-   Se respetan: pal[0] (transparente), pal[254] (especular),
-               pal[255] (sombra exterior), pal[251..253] (sombras).
+   Mezcla: color_lechoso = color_real * (8 - peso) / 8
+                         + leche      * peso        / 8
+   donde peso es [2..5] (más suave que antes para no oscurecer).
+
+   La leche es blanco casi puro (R=30, G=30, B=30) que desatura
+   sin oscurecer — efecto traslúcido/nevado en lugar de lodoso.
+
+   ETAPA_BRUTA: peso fijo = 5 (más cubierto, se ve poco color)
+   ETAPA_CORTADA: peso según nivel [2..4]
+
+   Índices afectados: [16..253] — colores del plasma.
+   Respetados: pal[0], pal[254] (especular), pal[255] (sombra).
 ================================================================ */
 static void aplicar_suciedad_paleta(uint16_t *pal, const Gema *g)
 {
-    /* peso en [1..4]: nivel 0→1, nivel 1→2, nivel 2→3, nivel 3→4 */
-    uint8_t nivel = gema_suciedad(g);
-    int peso = (int)nivel + 1;   /* [1..4] sobre una escala de 8 */
+    int peso;
 
-    /* Color de fango: gris terroso oscuro (R=10, G=8, B=6) en BGR555 */
-    int fango_r = 10;
-    int fango_g =  8;
-    int fango_b =  6;
+    if (g->etapa == ETAPA_BRUTA) {
+        /* Fase 1: siempre muy lechoso — el color real apenas asoma */
+        peso = 5;
+    } else {
+        /* Fase 2: peso según nivel de suciedad [0..3] → [2..4] */
+        uint8_t nivel = gema_suciedad(g);
+        peso = (int)nivel + 2;   /* [2..4] sobre escala de 8 */
+    }
+
+    /* Leche: blanco cálido casi puro (R=30, G=29, B=28) en BGR555 */
+    int leche_r = 30;
+    int leche_g = 29;
+    int leche_b = 28;
 
     for (int i = 16; i < 251; i++) {
         uint16_t c = pal[i];
@@ -792,9 +845,13 @@ static void aplicar_suciedad_paleta(uint16_t *pal, const Gema *g)
         int g = ((c >>  5) & 31);
         int b = ((c >> 10) & 31);
 
-        r = (r * (8 - peso) + fango_r * peso) >> 3;
-        g = (g * (8 - peso) + fango_g * peso) >> 3;
-        b = (b * (8 - peso) + fango_b * peso) >> 3;
+        r = (r * (8 - peso) + leche_r * peso) >> 3;
+        g = (g * (8 - peso) + leche_g * peso) >> 3;
+        b = (b * (8 - peso) + leche_b * peso) >> 3;
+
+        if (r > 31) r = 31;
+        if (g > 31) g = 31;
+        if (b > 31) b = 31;
 
         pal[i] = (uint16_t)((r & 31) | ((g & 31) << 5) | ((b & 31) << 10));
     }
@@ -935,11 +992,12 @@ void generar_paleta_gema(const Gema* g) {
     pal[255] = 0x4210;
 
     /* ----------------------------------------------------------------
-       SUCIEDAD (Fase 2): distorsiona la paleta generada hacia un tono
-       terroso oscuro. En Fase 3 no se aplica — los colores reales
-       quedan al descubierto al pulir la gema.
+       SUCIEDAD (Fase 1 y 2): desatura la paleta hacia blanco lechoso.
+       En Fase 1 (BRUTA) el filtro es fuerte — color apenas visible.
+       En Fase 2 (CORTADA) varía según nivel de suciedad de la gema.
+       En Fase 3 (PULIDA) no se aplica — colores reales al descubierto.
     ---------------------------------------------------------------- */
-    if (g->etapa == ETAPA_CORTADA) {
+    if (g->etapa == ETAPA_BRUTA || g->etapa == ETAPA_CORTADA) {
         aplicar_suciedad_paleta(pal, g);
     }
 }

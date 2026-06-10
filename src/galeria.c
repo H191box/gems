@@ -25,6 +25,9 @@
 #define LIST_ITEM_H   14
 #define LIST_ITEMS     8
 
+// Preview lazy: frames de inactividad antes de renderizar
+#define PREVIEW_DELAY_FRAMES  120   /* 2 segundos a 60fps */
+
 // ============================================================
 // TIPOS
 // ============================================================
@@ -42,19 +45,22 @@ typedef enum {
 static GaleriaID    galeria_activa  = GAL_G1;
 static VistaGaleria vista           = VISTA_LISTA;
 
-// G1
-static Gema  items[MAX_GALERIA];
-static int   num_items;
+// Pool completo (cargado una vez)
+static Gema  pool[MAX_POOL];
+static int   pool_num;
+
+// Vista filtrada de la caja activa
+static int   vista_idx[MAX_POOL];   /* pool_idx de cada entrada visible */
+static int   vista_num;
+
+// Navegación caja activa
 static int   cursor;
 static int   scroll;
 static int   opcion_submenu;
 
-// G2
-static Gema  g2_items[MAX_GALERIA2];
-static int   g2_num;
-static int   g2_cursor;
-static int   g2_scroll;
-static int   g2_submenu;
+// Cajas
+static CajaFiltro cajas[NUM_CAJAS];
+static int        caja_activa;      /* 0..NUM_CAJAS-1 */
 
 // G3
 static Gema  g3_items[MAX_GALERIA3];
@@ -63,11 +69,19 @@ static int   g3_cursor;
 static int   g3_scroll;
 static int   g3_submenu;
 
+// Preview lazy
+static int   preview_timer  = 0;   /* frames desde el último movimiento  */
+static int   preview_listo  = 0;   /* 1 = preview válido en pantalla      */
+
 extern uint8_t grieta_buf[160][240];
 
 static void limpiar_buffer_render(void) {
     memset(grieta_buf, 0, sizeof(grieta_buf));
 }
+
+/* Forward declare — usada antes de su definición */
+static void reconstruir_vista(void);
+static void render_lista(void);
 
 // ============================================================
 // HELPERS PALETA
@@ -111,23 +125,78 @@ static const char* NOMBRE_TIPO[6] = {
     "OPALO GRIS"
 };
 
+// Abreviaturas para el resumen de filtro en cabecera
+static const char* TIPO_ABR[6]   = {"NGR","CRI","FUE","BLA","ROS","GRS"};
+static const char* PAT_ABR[6]    = {"NEB","VEN","MAT","MOS","CHA","HAR"};
+
 // ============================================================
 // HELPERS VALOR
 // ============================================================
 
-static uint32_t valor_gema(int idx_g1)
+static uint32_t valor_gema(int vis_idx)
 {
-    return gema_valor_estimado(&items[idx_g1]);
-}
-
-static uint32_t valor_g2(int idx)
-{
-    return gema_valor_estimado(&g2_items[idx]);
+    return gema_valor_estimado(&pool[vista_idx[vis_idx]]);
 }
 
 static uint32_t valor_g3(int idx)
 {
     return gema_valor_estimado(&g3_items[idx]);
+}
+
+// ============================================================
+// RESUMEN FILTRO — para la cabecera
+// ============================================================
+
+/* Construye un string legible del filtro activo de una caja.
+   Formato: "NGR|FUE · NEB|MAT" o "TODO" si sin filtro. */
+static void caja_resumen_filtro(const CajaFiltro *f, char *buf, int buf_size)
+{
+    if (caja_filtro_vacia(f)) {
+        int i = 0;
+        const char *s = "TODO";
+        while (*s && i < buf_size - 1) buf[i++] = *s++;
+        buf[i] = '\0';
+        return;
+    }
+
+    char tmp[48];
+    int pos = 0;
+
+    /* Tipos con al menos un bit activo */
+    int primero = 1;
+    for (int t = 0; t < CF_NUM_TIPOS; t++) {
+        int tiene = 0;
+        for (int p = 0; p < CF_NUM_PATRONES; p++)
+            if (caja_filtro_activo(f, t, p)) { tiene = 1; break; }
+        if (!tiene) continue;
+        if (!primero && pos < 44) tmp[pos++] = '|';
+        const char *a = TIPO_ABR[t];
+        while (*a && pos < 44) tmp[pos++] = *a++;
+        primero = 0;
+    }
+
+    /* Separador central */
+    if (pos < 44) tmp[pos++] = ' ';
+    if (pos < 44) tmp[pos++] = '-';   /* GBA no tiene mid-dot en font ASCII */
+    if (pos < 44) tmp[pos++] = ' ';
+
+    /* Patrones con al menos un bit activo */
+    primero = 1;
+    for (int p = 0; p < CF_NUM_PATRONES; p++) {
+        int tiene = 0;
+        for (int t = 0; t < CF_NUM_TIPOS; t++)
+            if (caja_filtro_activo(f, t, p)) { tiene = 1; break; }
+        if (!tiene) continue;
+        if (!primero && pos < 44) tmp[pos++] = '|';
+        const char *a = PAT_ABR[p];
+        while (*a && pos < 44) tmp[pos++] = *a++;
+        primero = 0;
+    }
+    tmp[pos] = '\0';
+
+    int i = 0;
+    while (tmp[i] && i < buf_size - 1) { buf[i] = tmp[i]; i++; }
+    buf[i] = '\0';
 }
 
 // ============================================================
@@ -153,103 +222,63 @@ static void ordenar_g3(void)
 // ACCIONES G1
 // ============================================================
 
-static void mover_a_vitrina(int idx)
+static void evolucionar_gema(int vis_idx)
 {
-    if (num_items <= 0 || idx < 0 || idx >= num_items) return;
-    if (g2_num >= MAX_GALERIA2) return;
+    if (vista_num <= 0 || vis_idx < 0 || vis_idx >= vista_num) return;
+    int pi = vista_idx[vis_idx];
 
-    guardar_gema_galeria2(&items[idx]);
-    g2_items[g2_num] = items[idx];
-    g2_num++;
-
-    for (int i = idx; i < num_items - 1; i++) {
-        actualizar_gema_en_sram(i, &items[i + 1]);
-        items[i] = items[i + 1];
+    if (pool[pi].etapa == ETAPA_BRUTA) {
+        gema_cortar(&pool[pi]);
+        actualizar_gema_pool(pi, &pool[pi]);
     }
-    decrementar_num_gemas();
-    num_items--;
-
-    if (cursor >= num_items && cursor > 0) cursor = num_items - 1;
-    if (scroll > 0 && scroll + LIST_ITEMS > num_items) scroll--;
-    if (scroll < 0) scroll = 0;
-}
-
-static void evolucionar_gema(int idx)
-{
-    if (num_items <= 0 || idx < 0 || idx >= num_items) return;
-
-    if (items[idx].etapa == ETAPA_BRUTA) {
-        // Fase 1 -> Fase 2: Cortar (100% seguro)
-        gema_cortar(&items[idx]);
-        actualizar_gema_en_sram(idx, &items[idx]);
-    } 
-    else if (items[idx].etapa == ETAPA_CORTADA) {
-        // Fase 2 -> Fase 3: Pulir (20% de riesgo de grietas)
+    else if (pool[pi].etapa == ETAPA_CORTADA) {
         uint8_t dado = (uint8_t)(rand() % 100);
-        uint8_t umbral_fallo = 20; // 20% de probabilidad de fallo
-        
-        // gema_pulir cambia la etapa a ETAPA_PULIDA e inyecta 
-        // el FLAG_GRIETAS si el dado cae por debajo de 20
-        gema_pulir(&items[idx], dado, umbral_fallo);
-        actualizar_gema_en_sram(idx, &items[idx]);
+        gema_pulir(&pool[pi], dado, 20);
+        actualizar_gema_pool(pi, &pool[pi]);
     }
 }
-static void vender_item_seleccionado(int idx)
-{
-    if (idx < 0 || idx >= num_items) return;
 
-    uint32_t val = valor_gema(idx);
+static void vender_item_seleccionado(int vis_idx)
+{
+    if (vis_idx < 0 || vis_idx >= vista_num) return;
+    int pi = vista_idx[vis_idx];
+
+    uint32_t val = gema_valor_estimado(&pool[pi]);
     modificar_dinero((int32_t)val);
 
+    /* Registrar en G3 */
     if (g3_num >= MAX_GALERIA3) {
-        uint32_t valor_nueva  = gema_valor_estimado(&items[idx]);
         uint32_t valor_ultima = gema_valor_estimado(&g3_items[g3_num - 1]);
-        if (valor_nueva > valor_ultima) {
-            actualizar_gema_galeria3(g3_num - 1, &items[idx]);
-            g3_items[g3_num - 1] = items[idx];
+        if (val > valor_ultima) {
+            actualizar_gema_galeria3(g3_num - 1, &pool[pi]);
+            g3_items[g3_num - 1] = pool[pi];
             ordenar_g3();
         }
     } else {
-        guardar_gema_galeria3(&items[idx]);
-        g3_items[g3_num] = items[idx];
+        guardar_gema_galeria3(&pool[pi]);
+        g3_items[g3_num] = pool[pi];
         g3_num++;
         ordenar_g3();
     }
 
-    for (int i = idx; i < num_items - 1; i++) {
-        actualizar_gema_en_sram(i, &items[i + 1]);
-        items[i] = items[i + 1];
+    /* Compactar pool físico en SRAM */
+    for (int i = pi; i < pool_num - 1; i++) {
+        actualizar_gema_pool(i, &pool[i + 1]);
+        pool[i] = pool[i + 1];
     }
-    decrementar_num_gemas();
-    num_items--;
+    decrementar_pool();
+    pool_num--;
 
-    if (cursor >= num_items && cursor > 0) cursor--;
+    /* Reconstruir vista e invalidar preview */
+    reconstruir_vista();
+    preview_listo = 0;
+    preview_timer = 0;
+
+    if (cursor >= vista_num && cursor > 0) cursor = vista_num - 1;
     if (cursor < scroll) scroll = cursor;
-    if (scroll + LIST_ITEMS > num_items && num_items > LIST_ITEMS)
-        scroll = num_items - LIST_ITEMS;
+    if (scroll + LIST_ITEMS > vista_num && vista_num > LIST_ITEMS)
+        scroll = vista_num - LIST_ITEMS;
     if (scroll < 0) scroll = 0;
-}
-
-// ============================================================
-// ACCIONES G2
-// ============================================================
-
-static void devolver_a_g1(int idx)
-{
-    if (idx < 0 || idx >= g2_num) return;
-
-    guardar_gema(&g2_items[idx]);
-
-    for (int i = idx; i < g2_num - 1; i++) {
-        actualizar_gema_galeria2(i, &g2_items[i + 1]);
-        g2_items[i] = g2_items[i + 1];
-    }
-    decrementar_num_gemas_galeria2();
-    g2_num--;
-
-    if (g2_cursor >= g2_num && g2_cursor > 0) g2_cursor--;
-    if (g2_scroll > 0 && g2_scroll + LIST_ITEMS > g2_num) g2_scroll--;
-    if (g2_scroll < 0) g2_scroll = 0;
 }
 
 // ============================================================
@@ -265,7 +294,7 @@ static void comprar_desde_g3(int idx)
     if (dinero < val) return;
 
     modificar_dinero(-(int32_t)val);
-    guardar_gema(&g3_items[idx]);
+    guardar_gema_pool(&g3_items[idx]);
 
     for (int i = idx; i < g3_num - 1; i++) {
         actualizar_gema_galeria3(i, &g3_items[i + 1]);
@@ -280,8 +309,7 @@ static void comprar_desde_g3(int idx)
 }
 
 // ============================================================
-// HELPER RENDER THUMB — reutilizado por las 3 galerías
-// Renderiza la preview de una gema al cuadrante superior derecho.
+// HELPER RENDER THUMB
 // ============================================================
 
 static void render_thumb_gema(const Gema* g)
@@ -313,25 +341,22 @@ static void render_ficha(int idx)
 
     draw_text(vram, 5, y, "FICHA TECNICA", 255); y += 20;
 
-    int t = (int)gema_tipo(&items[idx]);
+    int t = (int)gema_tipo(&pool[vista_idx[idx]]);
     if (t < 0 || t >= NUM_TIPOS_OPALO) t = 0;
     draw_text(vram, 5, y, (char*)NOMBRE_TIPO[t], 255); y += 14;
 
-    // AUDITORÍA DE BRILLO: Calculamos los atributos percibidos para evitar fugas de información
     AtributosGema attr;
-    gema_calcular_atributos(&items[idx], &attr);
+    gema_calcular_atributos(&pool[vista_idx[idx]], &attr);
 
-    // CORREGIDO: Ahora muestra el brillo aparente (con sesgo) en lugar del brillo real de la semilla
     sprintf(buf, "BRILLO: %d", attr.brillo_aparente);
     draw_text(vram, 5, y, buf, 255); y += 12;
 
-    sprintf(buf, "PUREZA: %d", gema_pureza(&items[idx]));
+    sprintf(buf, "PUREZA: %d", gema_pureza(&pool[vista_idx[idx]]));
     draw_text(vram, 5, y, buf, 255); y += 12;
 
-    // SISTEMA DE PESO APARENTE: Se mantiene tu cambio con la función al vuelo
-    sprintf(buf, "PESO: %d K", gema_quilates_aparentes(&items[idx]));
+    sprintf(buf, "PESO: %d K", gema_quilates_aparentes(&pool[vista_idx[idx]]));
     draw_text(vram, 5, y, buf, 255); y += 12;
-    
+
     sprintf(buf, "VALOR: %u", (unsigned int)valor_gema(idx));
     draw_text(vram, 5, y, buf, 255);
 
@@ -339,7 +364,7 @@ static void render_ficha(int idx)
 }
 
 // ============================================================
-// RENDER OBSERVAR — pantalla completa bloqueante (G2 y G3)
+// RENDER OBSERVAR — pantalla completa
 // ============================================================
 
 static void render_observar(const Gema* g)
@@ -348,7 +373,7 @@ static void render_observar(const Gema* g)
 
     plasma_cache_rebuild(g);
 
-renderizar_opalo_pro(buf, 240, 160, g);
+    renderizar_opalo_pro(buf, 240, 160, g);
 
     vsync_only();
     generar_paleta_gema(g);
@@ -369,29 +394,46 @@ static void render_lista(void)
     limpiar_buffer_render();
 
     dibujar_fondo_texturizado_optimizado(vram, 0);
-    fill_rect(vram, 0, 0, 240, 12, 4);
-    draw_text(vram, 4, 2, "GALERIA 1  L/R:CAMBIAR", 255);
 
-    char txt_dinero[20];
-    sprintf(txt_dinero, "ORO:%d", obtener_dinero());
-    draw_text(vram, 170, 2, txt_dinero, 255);
-    vline(vram, LIST_W, 12, 148, 3);
+    /* --- Cabecera doble línea --- */
+    fill_rect(vram, 0, 0, 240, 20, 4);
 
-    if (num_items == 0) {
-        draw_text(vram, 10, 70, "GALERIA VACIA", 255);
-        draw_text(vram, 10, 85, "USA EL TALLER", 255);
-        draw_text(vram, 0, 152, "ARR/ABA:MOVER  START:MENU", 255);
+    /* Línea 1: nombre de caja + conteo X/Y + dinero */
+    {
+        char cab[32];
+        sprintf(cab, "CAJA %d  [%d/%d]", caja_activa + 1, vista_num, pool_num);
+        draw_text(vram, 4, 2, cab, 255);
+
+        char txt_dinero[20];
+        sprintf(txt_dinero, "ORO:%d", obtener_dinero());
+        draw_text(vram, 170, 2, txt_dinero, 255);
+    }
+
+    /* Línea 2: resumen del filtro activo */
+    {
+        char filtro[48];
+        caja_resumen_filtro(&cajas[caja_activa], filtro, sizeof(filtro));
+        draw_text(vram, 4, 11, filtro, 6);
+    }
+
+    vline(vram, LIST_W, 20, 132, 3);
+
+    if (vista_num == 0) {
+        draw_text(vram, 10, 70, "SIN RESULTADOS", 255);
+        draw_text(vram, 10, 85, "AJUSTA EL FILTRO", 255);
+        draw_text(vram, 0, 152, "IZQ/DER:x8  L/R:CAJA", 255);
         vsync_only();
         init_paleta_ui();
         flip_no_vsync();
         return;
     }
 
+    /* Lista de items */
     for (int i = 0; i < LIST_ITEMS; i++) {
         int idx = scroll + i;
-        if (idx >= num_items) break;
+        if (idx >= vista_num) break;
 
-        int y      = 13 + i * LIST_ITEM_H;
+        int y      = 21 + i * LIST_ITEM_H;
         uint8_t bg = (idx == cursor) ? 2 : 1;
         fill_rect(vram, 0, y, LIST_W - 1, LIST_ITEM_H - 1, bg);
 
@@ -400,13 +442,13 @@ static void render_lista(void)
         num[1] = '0' + ((idx + 1) % 10);
         draw_text(vram, 2, y + 3, num, 255);
 
-        int t = (int)gema_tipo(&items[idx]);
+        int t = (int)gema_tipo(&pool[vista_idx[idx]]);
         if (t < 0 || t >= 6) t = 0;
 
         char etiqueta[24];
-        if (items[idx].etapa == ETAPA_PULIDA)
+        if (pool[vista_idx[idx]].etapa == ETAPA_PULIDA)
             sprintf(etiqueta, "%s", NOMBRE_TIPO[t]);
-        else if (items[idx].etapa == ETAPA_CORTADA)
+        else if (pool[vista_idx[idx]].etapa == ETAPA_CORTADA)
             sprintf(etiqueta, "CABUJON %s", NOMBRE_TIPO[t]);
         else
             sprintf(etiqueta, "RAW %s", NOMBRE_TIPO[t]);
@@ -415,52 +457,58 @@ static void render_lista(void)
     }
 
     if (scroll > 0)
-        draw_text(vram, LIST_W / 2 - 4, 13, "^", 255);
-    if (scroll + LIST_ITEMS < num_items)
+        draw_text(vram, LIST_W / 2 - 4, 21, "^", 255);
+    if (scroll + LIST_ITEMS < vista_num)
         draw_text(vram, LIST_W / 2 - 4, 150, "v", 255);
 
-    if (cursor < num_items) {
-        render_thumb_gema(&items[cursor]);
+    /* --- Zona de preview (derecha) --- */
+    if (cursor < vista_num) {
+        if (preview_listo) {
+            /* Preview válido: dibujarlo */
+            render_thumb_gema(&pool[vista_idx[cursor]]);
 
-        int x = LIST_W + 4;
-        int y = 105;
-        char buf[24];
+            int x = LIST_W + 4;
+            int y = 105;
+            char buf[24];
 
-        int t = (int)gema_tipo(&items[cursor]);
-        if (t < 0 || t >= 6) t = 0;
+            int t = (int)gema_tipo(&pool[vista_idx[cursor]]);
+            if (t < 0 || t >= 6) t = 0;
 
-        if (items[cursor].etapa == ETAPA_PULIDA) {
-            draw_text(vram, x, y, (char*)NOMBRE_TIPO[t], 255); y += 12;
-            sprintf(buf, "QUILATES: %d", items[cursor].quilates);
-            draw_text(vram, x, y, buf, 255); y += 12;
-            sprintf(buf, "VALOR: %u", (unsigned int)valor_gema(cursor));
-            draw_text(vram, x, y, buf, 255); y += 14;
-        } else if (items[cursor].etapa == ETAPA_CORTADA) {
-            draw_text(vram, x, y, (char*)NOMBRE_TIPO[t], 255); y += 12;
-            sprintf(buf, "PESO: %d", items[cursor].quilates);
-            draw_text(vram, x, y, buf, 255); y += 12;
-            sprintf(buf, "VALOR: %u", (unsigned int)valor_gema(cursor));
-            draw_text(vram, x, y, buf, 255); y += 14;
+            if (pool[vista_idx[cursor]].etapa == ETAPA_PULIDA) {
+                draw_text(vram, x, y, (char*)NOMBRE_TIPO[t], 255); y += 12;
+                sprintf(buf, "QUILATES: %d", pool[vista_idx[cursor]].quilates);
+                draw_text(vram, x, y, buf, 255); y += 12;
+                sprintf(buf, "VALOR: %u", (unsigned int)valor_gema(cursor));
+                draw_text(vram, x, y, buf, 255); y += 14;
+            } else if (pool[vista_idx[cursor]].etapa == ETAPA_CORTADA) {
+                draw_text(vram, x, y, (char*)NOMBRE_TIPO[t], 255); y += 12;
+                sprintf(buf, "PESO: %d", pool[vista_idx[cursor]].quilates);
+                draw_text(vram, x, y, buf, 255); y += 12;
+                sprintf(buf, "VALOR: %u", (unsigned int)valor_gema(cursor));
+                draw_text(vram, x, y, buf, 255); y += 14;
+            } else {
+                draw_text(vram, x, y, "SIN IDENTIFICAR", 255); y += 14;
+                sprintf(buf, "PESO: %d", gema_quilates_aparentes(&pool[vista_idx[cursor]]));
+                draw_text(vram, x, y, buf, 255); y += 12;
+                sprintf(buf, "VALOR: %u", (unsigned int)valor_gema(cursor));
+                draw_text(vram, x, y, buf, 255); y += 14;
+            }
+
+            draw_text(vram, x, y, "A:OPCIONES", 255);
+
         } else {
-            // FASE 1 (ETAPA_BRUTA): Muestra los datos sin identificar con el peso sesgado
-            draw_text(vram, x, y, "SIN IDENTIFICAR", 255); y += 14;
-            
-            // MODIFICACIÓN: Cambiado items[cursor].quilates por gema_quilates_aparentes
-            sprintf(buf, "PESO: %d", gema_quilates_aparentes(&items[cursor]));
-            
-            draw_text(vram, x, y, buf, 255); y += 12;
-            sprintf(buf, "VALOR: %u", (unsigned int)valor_gema(cursor));
-            draw_text(vram, x, y, buf, 255); y += 14;
+            /* Telón: rectángulo negro + CARGANDO */
+            fill_rect(vram, LIST_W + 1, 20, 240 - LIST_W - 1, 132, 0);
+            draw_text(vram, LIST_W + 10, 78, "CARGANDO...", 255);
         }
-
-        draw_text(vram, x, y, "A:OPCIONES", 255);
     }
 
+    /* Submenu opciones G1 */
     if (vista == VISTA_SUBMENU) {
         int sm_x = LIST_W + 6;
         int sm_y = 82;
         int sm_w = 113;
-        int sm_h = 66;
+        int sm_h = 54;
         fill_rect(vram, sm_x, sm_y, sm_w, sm_h, 3);
         fill_rect(vram, sm_x + 2, sm_y + 2, sm_w - 4, sm_h - 4, 5);
 
@@ -468,131 +516,29 @@ static void render_lista(void)
                   opcion_submenu == 0 ? "> VER FICHA" : "  VER FICHA", 255);
 
         char txt_evolucion[20];
-        if (items[cursor].etapa == ETAPA_BRUTA)
+        if (pool[vista_idx[cursor]].etapa == ETAPA_BRUTA)
             sprintf(txt_evolucion, "%s", opcion_submenu == 1 ? "> CORTAR" : "  CORTAR");
-        else if (items[cursor].etapa == ETAPA_CORTADA)
+        else if (pool[vista_idx[cursor]].etapa == ETAPA_CORTADA)
             sprintf(txt_evolucion, "%s", opcion_submenu == 1 ? "> PULIR" : "  PULIR");
         else
             sprintf(txt_evolucion, "%s", opcion_submenu == 1 ? "> MAX EVOL" : "  MAX EVOL");
         draw_text(vram, sm_x + 6, sm_y + 20, txt_evolucion, 255);
 
         draw_text(vram, sm_x + 6, sm_y + 34,
-                  opcion_submenu == 2 ? "> A VITRINA" : "  A VITRINA", 255);
-        draw_text(vram, sm_x + 6, sm_y + 48,
-                  opcion_submenu == 3 ? "> VENDER" : "  VENDER", 255);
+                  opcion_submenu == 2 ? "> VENDER" : "  VENDER", 255);
     }
 
-    draw_text(vram, 0, 152, "ARR/ABA:MOVER  START:MENU", 255);
+    draw_text(vram, 0, 152, "ARR/ABA:1  IZQ/DER:8  L/R:CAJA", 255);
 
     vsync_only();
     init_paleta_ui();
-    if (num_items > 0 && cursor < num_items)
-        generar_paleta_gema(&items[cursor]);
-    flip_no_vsync();
-}
-// ============================================================
-// RENDER LISTA G2 (Vitrina) — misma UI que G1
-// ============================================================
-
-static void render_g2(void)
-{
-    uint16_t* vram = get_vram();
-    limpiar_buffer_render();
-
-    dibujar_fondo_texturizado_optimizado(vram, 0);
-    fill_rect(vram, 0, 0, 240, 12, 4);
-    draw_text(vram, 4, 2, "VITRINA  L/R:CAMBIAR", 255);
-
-    char txt_dinero[20];
-    sprintf(txt_dinero, "ORO:%d", obtener_dinero());
-    draw_text(vram, 170, 2, txt_dinero, 255);
-    vline(vram, LIST_W, 12, 148, 3);
-
-    if (g2_num == 0) {
-        draw_text(vram, 10, 70, "VITRINA VACIA", 255);
-        draw_text(vram, 10, 85, "MUEVE DESDE G1", 255);
-        draw_text(vram, 0, 152, "ARR/ABA:MOVER  START:MENU", 255);
-        vsync_only();
-        init_paleta_ui();
-        flip_no_vsync();
-        return;
-    }
-
-    for (int i = 0; i < LIST_ITEMS; i++) {
-        int idx = g2_scroll + i;
-        if (idx >= g2_num) break;
-
-        int y      = 13 + i * LIST_ITEM_H;
-        uint8_t bg = (idx == g2_cursor) ? 2 : 1;
-        fill_rect(vram, 0, y, LIST_W - 1, LIST_ITEM_H - 1, bg);
-
-        char num[4] = "XX.";
-        num[0] = '0' + ((idx + 1) / 10);
-        num[1] = '0' + ((idx + 1) % 10);
-        draw_text(vram, 2, y + 3, num, 255);
-
-        int t = (int)gema_tipo(&g2_items[idx]);
-        if (t < 0 || t >= 6) t = 0;
-
-        char etiqueta[24];
-        if (g2_items[idx].etapa == ETAPA_PULIDA)
-            sprintf(etiqueta, "%s", NOMBRE_TIPO[t]);
-        else if (g2_items[idx].etapa == ETAPA_CORTADA)
-            sprintf(etiqueta, "CABUJON %s", NOMBRE_TIPO[t]);
-        else
-            sprintf(etiqueta, "RAW %s", NOMBRE_TIPO[t]);
-
-        draw_text(vram, 20, y + 3, etiqueta, 255);
-    }
-
-    if (g2_scroll > 0)
-        draw_text(vram, LIST_W / 2 - 4, 13, "^", 255);
-    if (g2_scroll + LIST_ITEMS < g2_num)
-        draw_text(vram, LIST_W / 2 - 4, 150, "v", 255);
-
-    if (g2_cursor < g2_num) {
-        render_thumb_gema(&g2_items[g2_cursor]);
-
-        int x = LIST_W + 4;
-        int y = 105;
-        char buf[24];
-
-        int t = (int)gema_tipo(&g2_items[g2_cursor]);
-        if (t < 0 || t >= 6) t = 0;
-
-        draw_text(vram, x, y, (char*)NOMBRE_TIPO[t], 255); y += 12;
-        sprintf(buf, "QUILATES: %d", g2_items[g2_cursor].quilates);
-        draw_text(vram, x, y, buf, 255); y += 12;
-        sprintf(buf, "VALOR: %u", (unsigned int)valor_g2(g2_cursor));
-        draw_text(vram, x, y, buf, 255); y += 14;
-        draw_text(vram, x, y, "A:OPCIONES", 255);
-    }
-
-    if (vista == VISTA_G2_SUBMENU && g2_num > 0) {
-        int sm_x = LIST_W + 6;
-        int sm_y = 82;
-        int sm_w = 113;
-        int sm_h = 40;
-        fill_rect(vram, sm_x, sm_y, sm_w, sm_h, 3);
-        fill_rect(vram, sm_x + 2, sm_y + 2, sm_w - 4, sm_h - 4, 5);
-
-        draw_text(vram, sm_x + 6, sm_y + 6,
-                  g2_submenu == 0 ? "> OBSERVAR"    : "  OBSERVAR",    255);
-        draw_text(vram, sm_x + 6, sm_y + 20,
-                  g2_submenu == 1 ? "> DEVOLVER G1" : "  DEVOLVER G1", 255);
-    }
-
-    draw_text(vram, 0, 152, "ARR/ABA:MOVER  START:MENU", 255);
-
-    vsync_only();
-    init_paleta_ui();
-    if (g2_num > 0 && g2_cursor < g2_num)
-        generar_paleta_gema(&g2_items[g2_cursor]);
+    if (vista_num > 0 && cursor < vista_num && preview_listo)
+        generar_paleta_gema(&pool[vista_idx[cursor]]);
     flip_no_vsync();
 }
 
 // ============================================================
-// RENDER LISTA G3 (Mercado) — misma UI que G1
+// RENDER LISTA G3 (Mercado)
 // ============================================================
 
 static void render_g3(void)
@@ -602,7 +548,7 @@ static void render_g3(void)
 
     dibujar_fondo_texturizado_optimizado(vram, 0);
     fill_rect(vram, 0, 0, 240, 12, 4);
-    draw_text(vram, 4, 2, "MERCADO  L/R:CAMBIAR", 255);
+    draw_text(vram, 4, 2, "MERCADO  L/R:VOLVER", 255);
 
     char txt_dinero[20];
     sprintf(txt_dinero, "ORO:%d", obtener_dinero());
@@ -685,38 +631,62 @@ static void render_g3(void)
 }
 
 // ============================================================
-// CAMBIAR GALERÍA — con fade para ocultar la carga
+// RECONSTRUIR VISTA FILTRADA
 // ============================================================
 
-static void cambiar_galeria(int dir)
+static void reconstruir_vista(void)
 {
-    int next = ((int)galeria_activa + dir + 3) % 3;
-    galeria_activa = (GaleriaID)next;
+    vista_num = 0;
+    for (int i = 0; i < pool_num; i++) {
+        if (caja_filtro_acepta(&cajas[caja_activa], &pool[i])) {
+            vista_idx[vista_num++] = i;
+        }
+    }
+    /* Ajustar cursor/scroll al nuevo tamaño */
+    if (cursor >= vista_num) cursor = vista_num > 0 ? vista_num - 1 : 0;
+    if (scroll > cursor)     scroll = cursor;
+
+    /* Invalidar preview al cambiar contenido */
+    preview_listo = 0;
+    preview_timer = 0;
+}
+
+// ============================================================
+// CAMBIAR CAJA / NAVEGAR A G3
+// ============================================================
+
+static void cambiar_caja(int dir)
+{
+    caja_activa = (caja_activa + dir + NUM_CAJAS) % NUM_CAJAS;
 
     fade_out();
+    reconstruir_vista();
+    cursor = 0; scroll = 0;
+    vista  = VISTA_LISTA;
+    render_lista();
+    fade_in();
+}
 
-    switch (galeria_activa) {
-        case GAL_G1:
-            num_items = cargar_gemas(items);
-            cursor = 0; scroll = 0;
-            vista = VISTA_LISTA;
-            render_lista();
-            break;
-        case GAL_G2:
-            g2_num    = cargar_gemas_galeria2(g2_items);
-            g2_cursor = 0; g2_scroll = 0;
-            vista = VISTA_G2;
-            render_g2();
-            break;
-        case GAL_G3:
-            g3_num    = cargar_gemas_galeria3(g3_items);
-            g3_cursor = 0; g3_scroll = 0;
-            ordenar_g3();
-            vista = VISTA_G3;
-            render_g3();
-            break;
-    }
+static void ir_a_g3(void)
+{
+    galeria_activa = GAL_G3;
+    fade_out();
+    g3_num    = cargar_gemas_galeria3(g3_items);
+    g3_cursor = 0; g3_scroll = 0;
+    ordenar_g3();
+    vista = VISTA_G3;
+    render_g3();
+    fade_in();
+}
 
+static void volver_a_cajas(void)
+{
+    galeria_activa = GAL_G1;
+    fade_out();
+    reconstruir_vista();
+    cursor = 0; scroll = 0;
+    vista  = VISTA_LISTA;
+    render_lista();
     fade_in();
 }
 
@@ -728,21 +698,34 @@ void galeria_init(void)
 {
     fade_out();
 
-    num_items = cargar_gemas(items);
-    g2_num    = cargar_gemas_galeria2(g2_items);
-    g3_num    = cargar_gemas_galeria3(g3_items);
+    pool_num = cargar_pool(pool);
+    g3_num   = cargar_gemas_galeria3(g3_items);
+    cargar_cajas(cajas);
 
-    cursor    = 0; scroll    = 0;
-    g2_cursor = 0; g2_scroll = 0;
-    g3_cursor = 0; g3_scroll = 0;
+    cursor         = 0;
+    scroll         = 0;
+    g3_cursor      = 0;
+    g3_scroll      = 0;
     opcion_submenu = 0;
+    caja_activa    = 0;
     galeria_activa = GAL_G1;
     vista          = VISTA_LISTA;
+    preview_listo  = 0;
+    preview_timer  = 0;
 
+    reconstruir_vista();
     ordenar_g3();
 
     render_lista();
     fade_in();
+}
+
+void galeria_recargar_caja_activa(void)
+{
+    cargar_cajas(cajas);
+    reconstruir_vista();
+    cursor = 0; scroll = 0;
+    render_lista();
 }
 
 // ============================================================
@@ -760,17 +743,28 @@ void galeria_input(uint16_t keys)
         volver_menu_con_fade();
         return;
     }
-    if (keys_pressed & KEY_L) { cambiar_galeria(-1); return; }
-    if (keys_pressed & KEY_R) { cambiar_galeria(+1); return; }
+
+    if (keys_pressed & KEY_L) {
+        if (galeria_activa == GAL_G3) volver_a_cajas();
+        else cambiar_caja(-1);
+        return;
+    }
+    if (keys_pressed & KEY_R) {
+        if (galeria_activa == GAL_G3) volver_a_cajas();
+        else cambiar_caja(+1);
+        return;
+    }
 
     // --------------------------------------------------------
-    // G1
+    // G1 — cajas
     // --------------------------------------------------------
     if (galeria_activa == GAL_G1) {
         int moved = 0;
 
         if (vista == VISTA_LISTA) {
-            if ((keys_pressed & KEY_DOWN) && cursor + 1 < num_items) {
+
+            /* Movimiento de 1 en 1 */
+            if ((keys_pressed & KEY_DOWN) && cursor + 1 < vista_num) {
                 cursor++;
                 if (cursor >= scroll + LIST_ITEMS)
                     scroll = cursor - LIST_ITEMS + 1;
@@ -781,7 +775,27 @@ void galeria_input(uint16_t keys)
                 if (cursor < scroll) scroll = cursor;
                 moved = 1;
             }
-            if ((keys_pressed & KEY_A) && num_items > 0) {
+
+            /* Movimiento de 8 en 8 con cruceta izquierda/derecha */
+            if (keys_pressed & KEY_LEFT) {
+                cursor -= 8;
+                if (cursor < 0) cursor = 0;
+                scroll = cursor - (LIST_ITEMS / 2);
+                if (scroll < 0) scroll = 0;
+                moved = 1;
+            }
+            if (keys_pressed & KEY_RIGHT) {
+                cursor += 8;
+                if (cursor >= vista_num) cursor = vista_num > 0 ? vista_num - 1 : 0;
+                scroll = cursor - (LIST_ITEMS / 2);
+                if (scroll < 0) scroll = 0;
+                if (scroll + LIST_ITEMS > vista_num)
+                    scroll = vista_num - LIST_ITEMS;
+                if (scroll < 0) scroll = 0;
+                moved = 1;
+            }
+
+            if ((keys_pressed & KEY_A) && vista_num > 0) {
                 vista = VISTA_SUBMENU;
                 opcion_submenu = 0;
                 moved = 1;
@@ -791,14 +805,32 @@ void galeria_input(uint16_t keys)
                 return;
             }
 
+            /* Timer de preview lazy */
+            if (moved) {
+                /* Movimiento: invalidar preview */
+                preview_listo = 0;
+                preview_timer = 0;
+            } else {
+                /* Sin movimiento: avanzar timer si preview pendiente */
+                if (!preview_listo && vista_num > 0) {
+                    preview_timer++;
+                    if (preview_timer >= PREVIEW_DELAY_FRAMES) {
+                        preview_listo = 1;
+                        preview_timer = 0;
+                        render_lista();
+                        return;
+                    }
+                }
+            }
+
         } else if (vista == VISTA_SUBMENU) {
             if (keys_pressed & KEY_UP) {
                 if (opcion_submenu > 0) opcion_submenu--;
-                else opcion_submenu = 3;
+                else opcion_submenu = 2;
                 moved = 1;
             }
             if (keys_pressed & KEY_DOWN) {
-                if (opcion_submenu < 3) opcion_submenu++;
+                if (opcion_submenu < 2) opcion_submenu++;
                 else opcion_submenu = 0;
                 moved = 1;
             }
@@ -807,16 +839,18 @@ void galeria_input(uint16_t keys)
                 moved = 1;
             }
             if (keys_pressed & KEY_A) {
-                moved = 1;
                 if (opcion_submenu == 0) {
                     vista = VISTA_FICHA;
-                } else if (opcion_submenu == 1) {
+                    render_observar(&pool[vista_idx[cursor]]);
+                    return;   /* salir sin tocar moved — evita render_ficha encima */
+                }
+                moved = 1;
+                if (opcion_submenu == 1) {
+
                     evolucionar_gema(cursor);
+                    preview_listo = 0;   /* gema cambió, invalidar preview */
                     vista = VISTA_LISTA;
                 } else if (opcion_submenu == 2) {
-                    mover_a_vitrina(cursor);
-                    vista = VISTA_LISTA;
-                } else if (opcion_submenu == 3) {
                     vender_item_seleccionado(cursor);
                     vista = VISTA_LISTA;
                 }
@@ -841,60 +875,9 @@ void galeria_input(uint16_t keys)
             }
         }
     }
+
     // --------------------------------------------------------
-    // G2
-    // --------------------------------------------------------
-    else if (galeria_activa == GAL_G2) {
-        int moved = 0;
-
-        if (vista == VISTA_G2) {
-            if ((keys_pressed & KEY_DOWN) && g2_cursor + 1 < g2_num) {
-                g2_cursor++;
-                if (g2_cursor >= g2_scroll + LIST_ITEMS)
-                    g2_scroll = g2_cursor - LIST_ITEMS + 1;
-                moved = 1;
-            }
-            if ((keys_pressed & KEY_UP) && g2_cursor > 0) {
-                g2_cursor--;
-                if (g2_cursor < g2_scroll) g2_scroll = g2_cursor;
-                moved = 1;
-            }
-            if ((keys_pressed & KEY_A) && g2_num > 0) {
-                vista = VISTA_G2_SUBMENU;
-                g2_submenu = 0;
-                moved = 1;
-            }
-            if (keys_pressed & KEY_B) {
-                volver_menu_con_fade();
-                return;
-            }
-
-        } else if (vista == VISTA_G2_OBSERVAR) {
-            if (keys_pressed & KEY_B) {
-                vista = VISTA_G2;
-                render_g2();
-            }
-
-        } else if (vista == VISTA_G2_SUBMENU) {
-            if (keys_pressed & KEY_UP)   { g2_submenu = !g2_submenu; moved = 1; }
-            if (keys_pressed & KEY_DOWN) { g2_submenu = !g2_submenu; moved = 1; }
-            if (keys_pressed & KEY_B)    { vista = VISTA_G2; moved = 1; }
-            if (keys_pressed & KEY_A) {
-                if (g2_submenu == 0) {
-                    vista = VISTA_G2_OBSERVAR;
-                    render_observar(&g2_items[g2_cursor]);
-                } else {
-                    devolver_a_g1(g2_cursor);
-                    vista = VISTA_G2;
-                    moved = 1;
-                }
-            }
-        }
-
-        if (moved) render_g2();
-    }
-    // --------------------------------------------------------
-    // G3
+    // G3 — Mercado
     // --------------------------------------------------------
     else if (galeria_activa == GAL_G3) {
         int moved = 0;
@@ -933,13 +916,11 @@ void galeria_input(uint16_t keys)
             if (keys_pressed & KEY_B)    { vista = VISTA_G3; moved = 1; }
             if (keys_pressed & KEY_A) {
                 if (g3_submenu == 0) {
-                    /* COMPRAR */
                     comprar_desde_g3(g3_cursor);
                     ordenar_g3();
                     vista = VISTA_G3;
                     moved = 1;
                 } else {
-                    /* OBSERVAR */
                     vista = VISTA_G3_OBSERVAR;
                     render_observar(&g3_items[g3_cursor]);
                 }

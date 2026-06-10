@@ -20,10 +20,10 @@ extern uint8_t mes_actual;
 
 const Saco SACOS[4] = {
     /* nombre, precio, cantidad, tier */
-    {"SACO POBRE",        120,  3, 1},
-    {"SACO MINERO",       450,  5, 2},
-    {"SACO INDUSTRIAL",  1600,  7, 3},
-    {"MEGA CARGAMENTO",  5000, 10, 4}
+    {"SACO POBRE",             500,  3, 1},
+    {"SACO MINERO",          10000,  5, 2},
+    {"SACO INDUSTRIAL",     100000,  7, 3},
+    {"MEGA CARGAMENTO",    1000000, 10, 4}
 };
 
 /* Semilla global */
@@ -134,7 +134,7 @@ void comprar_saco(int idx)
         nueva_gema.etapa = ETAPA_BRUTA;
         nueva_gema.flags = 0;
 
-        guardar_gema(&nueva_gema);
+        guardar_gema_pool(&nueva_gema);
     }
 
     saco_seed += 0x9E3779B9u;
